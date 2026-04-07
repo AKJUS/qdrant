@@ -75,16 +75,16 @@ where
         Ok(Cow::Borrowed(items))
     }
 
-    fn read_batch<P: AccessPattern>(
-        &self,
-        ranges: impl IntoIterator<Item = ReadRange>,
-        mut callback: impl FnMut(usize, &[T]) -> Result<()>,
+    fn read_batch<'a, P: AccessPattern, Meta: 'a>(
+        &'a self,
+        ranges: impl IntoIterator<Item = (Meta, ReadRange)>,
+        mut callback: impl FnMut(Meta, &[T]) -> Result<()>,
     ) -> Result<()> {
         let mmap = self.as_bytes::<P>();
 
-        for (idx, range) in ranges.into_iter().enumerate() {
+        for (meta, range) in ranges {
             let items = read(mmap, range)?;
-            callback(idx, items)?;
+            callback(meta, items)?;
         }
 
         Ok(())

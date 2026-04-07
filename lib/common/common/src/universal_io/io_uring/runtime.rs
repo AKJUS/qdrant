@@ -8,13 +8,13 @@ use slab::Slab;
 use super::*;
 use crate::maybe_uninit;
 
-pub struct IoUringRuntime<'data, T> {
+pub struct IoUringRuntime<'data, T, Meta = u64> {
     io_uring: IoUringGuard,
-    state: IoUringState<'data, T>,
+    state: IoUringState<'data, T, Meta>,
     pub in_progress: usize,
 }
 
-impl<'data, T> IoUringRuntime<'data, T> {
+impl<'data, T, Meta> IoUringRuntime<'data, T, Meta> {
     pub fn new() -> Result<Self> {
         let mut io_uring = pool::get_io_uring()?;
         let capacity = io_uring.submission().capacity();
@@ -31,7 +31,7 @@ impl<'data, T> IoUringRuntime<'data, T> {
     /// or the queue is full.
     pub fn enqueue_while<F>(&mut self, mut entries: F) -> Result<()>
     where
-        F: FnMut(&mut IoUringState<'data, T>) -> Result<Option<squeue::Entry>>,
+        F: FnMut(&mut IoUringState<'data, T, Meta>) -> Result<Option<squeue::Entry>>,
     {
         let mut squeue = self.io_uring.submission();
 
@@ -97,7 +97,7 @@ impl<'data, T> IoUringRuntime<'data, T> {
         Ok(())
     }
 
-    pub fn completed(&mut self) -> impl Iterator<Item = io::Result<(u64, IoUringResponse<T>)>> {
+    pub fn completed(&mut self) -> impl Iterator<Item = io::Result<(Meta, IoUringResponse<T>)>> {
         self.io_uring.completion().map(|entry| {
             self.in_progress -= 1;
 
@@ -114,13 +114,13 @@ impl<'data, T> IoUringRuntime<'data, T> {
             }
 
             let length = result as _;
-            let (id, resp) = self.state.finalize(slot, length)?;
-            Ok((id, resp))
+            let (meta, resp) = self.state.finalize(slot, length)?;
+            Ok((meta, resp))
         })
     }
 }
 
-impl<'data, T> Drop for IoUringRuntime<'data, T> {
+impl<'data, T, Meta> Drop for IoUringRuntime<'data, T, Meta> {
     fn drop(&mut self) {
         while self.in_progress > 0 || !self.io_uring.submission().is_empty() {
             // TODO: Cancel operations with `io_uring::Submitter::register_sync_cancel`?
@@ -140,11 +140,11 @@ impl<'data, T> Drop for IoUringRuntime<'data, T> {
 }
 
 #[derive(Debug)]
-pub struct IoUringState<'data, T> {
-    requests: Slab<(RequestId, IoUringRequest<'data, T>)>,
+pub struct IoUringState<'data, T, Meta> {
+    requests: Slab<(Meta, IoUringRequest<'data, T>)>,
 }
 
-impl<'data, T> IoUringState<'data, T> {
+impl<'data, T, Meta> IoUringState<'data, T, Meta> {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             requests: Slab::with_capacity(capacity),
@@ -153,14 +153,7 @@ impl<'data, T> IoUringState<'data, T> {
 
     /// Allocates `Vec<MaybeUninit<T>>`, reinterprets it as `Vec<MaybeUninit<u8>>`, and stores the byte buffer
     /// so the kernel writes into correctly aligned memory for `T`.
-    pub fn read(
-        &mut self,
-        id: RequestId,
-        fd: Fd,
-        range: ReadRange,
-        file_index: FileIndex,
-        direct_io: bool,
-    ) -> squeue::Entry
+    pub fn read(&mut self, meta: Meta, fd: Fd, range: ReadRange, direct_io: bool) -> squeue::Entry
     where
         T: bytemuck::Pod,
     {
@@ -172,14 +165,7 @@ impl<'data, T> IoUringState<'data, T> {
         let mut items: Vec<MaybeUninit<T>> = Vec::with_capacity(length as _);
         items.resize_with(length as _, || MaybeUninit::uninit());
 
-        let (slot, req) = self.init(
-            id,
-            IoUringRequest::Read {
-                items,
-                file_index,
-                direct_io,
-            },
-        );
+        let (slot, req) = self.init(meta, IoUringRequest::Read { items, direct_io });
         let items = req.expect_read();
 
         let bytes_ptr = items.as_mut_ptr().cast();
@@ -193,7 +179,7 @@ impl<'data, T> IoUringState<'data, T> {
 
     pub fn write(
         &mut self,
-        id: RequestId,
+        meta: Meta,
         fd: Fd,
         byte_offset: u64,
         items: &'data [T],
@@ -201,7 +187,7 @@ impl<'data, T> IoUringState<'data, T> {
     where
         T: bytemuck::Pod,
     {
-        let (slot, req) = self.init(id, IoUringRequest::Write(items));
+        let (slot, req) = self.init(meta, IoUringRequest::Write(items));
         let items = req.expect_write();
 
         let bytes: &[u8] = bytemuck::cast_slice(items);
@@ -214,12 +200,12 @@ impl<'data, T> IoUringState<'data, T> {
 
     fn init(
         &mut self,
-        id: RequestId,
+        meta: Meta,
         req: IoUringRequest<'data, T>,
     ) -> (usize, &mut IoUringRequest<'data, T>) {
         let entry = self.requests.vacant_entry();
         let slot = entry.key();
-        let (_, req) = entry.insert((id, req));
+        let (_, req) = entry.insert((meta, req));
         (slot, req)
     }
 
@@ -227,8 +213,8 @@ impl<'data, T> IoUringState<'data, T> {
         &mut self,
         slot: usize,
         byte_length: u32,
-    ) -> io::Result<(RequestId, IoUringResponse<T>)> {
-        let (id, req) = self
+    ) -> io::Result<(Meta, IoUringResponse<T>)> {
+        let (meta, req) = self
             .requests
             .try_remove(slot)
             .ok_or_else(|| io::Error::other(format!("request in slot {slot} does not exist")))?;
@@ -238,7 +224,6 @@ impl<'data, T> IoUringState<'data, T> {
         let resp = match req {
             IoUringRequest::Read {
                 mut items,
-                file_index,
                 direct_io,
             } => {
                 if direct_io {
@@ -251,7 +236,7 @@ impl<'data, T> IoUringState<'data, T> {
                 }
 
                 let items: Vec<T> = unsafe { maybe_uninit::assume_init_vec(items) };
-                IoUringResponse::Read { items, file_index }
+                IoUringResponse::Read(items)
             }
 
             IoUringRequest::Write(items) => {
@@ -260,7 +245,7 @@ impl<'data, T> IoUringState<'data, T> {
             }
         };
 
-        Ok((id, resp))
+        Ok((meta, resp))
     }
 
     pub fn abort(&mut self, slot: usize) {
@@ -268,19 +253,16 @@ impl<'data, T> IoUringState<'data, T> {
     }
 }
 
-impl<'data, T> Drop for IoUringState<'data, T> {
+impl<'data, T, Meta> Drop for IoUringState<'data, T, Meta> {
     fn drop(&mut self) {
         debug_assert!(self.requests.is_empty());
     }
 }
 
-pub type RequestId = u64;
-
 #[derive(Debug)]
 pub enum IoUringRequest<'data, T> {
     Read {
         items: Vec<MaybeUninit<T>>,
-        file_index: FileIndex,
         direct_io: bool,
     },
 
@@ -307,19 +289,15 @@ impl<'data, T> IoUringRequest<'data, T> {
 
 #[derive(Debug)]
 pub enum IoUringResponse<T> {
-    Read {
-        items: Vec<T>,
-        file_index: FileIndex,
-    },
-
+    Read(Vec<T>),
     Write,
 }
 
 impl<T> IoUringResponse<T> {
-    pub fn expect_read(self) -> (FileIndex, Vec<T>) {
+    pub fn expect_read(self) -> Vec<T> {
         #[expect(clippy::match_wildcard_for_single_variants)]
         match self {
-            Self::Read { items, file_index } => (file_index, items),
+            Self::Read(items) => items,
             _ => panic!(),
         }
     }

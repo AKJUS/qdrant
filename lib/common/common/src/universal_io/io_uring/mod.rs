@@ -91,48 +91,62 @@ impl<T: bytemuck::Pod + 'static> UniversalRead<T> for IoUringFile {
         Ok(Cow::Owned(items))
     }
 
-    fn read_batch<P: AccessPattern>(
-        &self,
-        ranges: impl IntoIterator<Item = ReadRange>,
-        mut callback: impl FnMut(usize, &[T]) -> Result<()>,
+    fn read_batch<'a, P: AccessPattern, Meta: 'a>(
+        &'a self,
+        ranges: impl IntoIterator<Item = (Meta, ReadRange)>,
+        mut callback: impl FnMut(Meta, &[T]) -> Result<()>,
     ) -> Result<()> {
-        for record in self.read_iter::<P>(ranges) {
-            let (idx, items) = record?;
-            callback(idx, &items)?;
+        for record in self.read_iter::<P, Meta>(ranges) {
+            let (meta, items) = record?;
+            callback(meta, &items)?;
         }
 
         Ok(())
     }
 
-    fn read_iter<P: AccessPattern>(
+    fn read_iter<P: AccessPattern, Meta>(
         &self,
-        ranges: impl IntoIterator<Item = ReadRange>,
-    ) -> impl Iterator<Item = Result<(usize, Cow<'_, [T]>)>> {
-        match IoUringReadIter::new(self, ranges.into_iter()) {
-            Ok(iter) => itertools::Either::Left(iter),
+        ranges: impl IntoIterator<Item = (Meta, ReadRange)>,
+    ) -> impl Iterator<Item = Result<(Meta, Cow<'_, [T]>)>> {
+        let fd = self.fd();
+        let direct_io = self.direct_io;
+        let ranges = ranges
+            .into_iter()
+            .map(move |(meta, range)| (meta, fd, direct_io, range));
+        match IoUringReadIter::new(ranges) {
+            Ok(iter) => itertools::Either::Left(
+                iter.map(|result| result.map(|(meta, items)| (meta, Cow::Owned(items)))),
+            ),
             Err(err) => itertools::Either::Right(iter::once(Err(err))),
         }
     }
 
-    fn read_multi<P: AccessPattern>(
-        files: &[Self],
-        reads: impl IntoIterator<Item = (FileIndex, ReadRange)>,
-        mut callback: impl FnMut(usize, FileIndex, &[T]) -> Result<()>,
-    ) -> Result<()> {
-        for record in Self::read_multi_iter::<P>(files, reads) {
-            let (idx, file_idx, items) = record?;
-            callback(idx, file_idx, &items)?;
+    fn read_multi<'a, P: AccessPattern, Meta: 'a>(
+        reads: impl IntoIterator<Item = (Meta, &'a Self, ReadRange)>,
+        mut callback: impl FnMut(Meta, &[T]) -> Result<()>,
+    ) -> Result<()>
+    where
+        Self: 'a,
+    {
+        for record in Self::read_multi_iter::<'a, P, Meta>(reads) {
+            let (meta, items) = record?;
+            callback(meta, &items)?;
         }
 
         Ok(())
     }
 
-    fn read_multi_iter<P: AccessPattern>(
-        files: &[Self],
-        reads: impl IntoIterator<Item = (FileIndex, ReadRange)>,
-    ) -> impl Iterator<Item = Result<(usize, FileIndex, Cow<'_, [T]>)>> {
-        match IoUringReadMultiIter::new(files, reads.into_iter()) {
-            Ok(iter) => itertools::Either::Left(iter),
+    fn read_multi_iter<'a, P: AccessPattern, Meta>(
+        reads: impl IntoIterator<Item = (Meta, &'a Self, ReadRange)>,
+    ) -> impl Iterator<Item = Result<(Meta, Cow<'a, [T]>)>> {
+        let ranges = reads
+            .into_iter()
+            .map(|(meta, file, range)| (meta, file.fd(), file.direct_io, range));
+
+        match IoUringReadIter::new(ranges) {
+            Ok(iter) => itertools::Either::Left(
+                iter.map(|result| result.map(|(meta, items)| (meta, Cow::Owned(items)))),
+            ),
             Err(err) => itertools::Either::Right(iter::once(Err(err))),
         }
     }
@@ -180,15 +194,15 @@ impl<T: bytemuck::Pod + 'static> UniversalWrite<T> for IoUringFile {
         items: impl IntoIterator<Item = (ByteOffset, &'a [T])>,
     ) -> Result<()> {
         let mut rt = IoUringRuntime::new()?;
-        let mut items = items.into_iter().enumerate().peekable();
+        let mut items = items.into_iter().peekable();
 
         while items.peek().is_some() || rt.in_progress > 0 {
             rt.enqueue_while(|state| {
-                let Some((id, (byte_offset, items))) = items.next() else {
+                let Some((byte_offset, items)) = items.next() else {
                     return Ok(None);
                 };
 
-                let entry = state.write(id as _, self.fd(), byte_offset, items);
+                let entry = state.write((), self.fd(), byte_offset, items);
                 Ok(Some(entry))
             })?;
 
@@ -208,11 +222,11 @@ impl<T: bytemuck::Pod + 'static> UniversalWrite<T> for IoUringFile {
         writes: impl IntoIterator<Item = (FileIndex, ByteOffset, &'a [T])>,
     ) -> Result<()> {
         let mut rt = IoUringRuntime::new()?;
-        let mut writes = writes.into_iter().enumerate().peekable();
+        let mut writes = writes.into_iter().peekable();
 
         while writes.peek().is_some() || rt.in_progress > 0 {
             rt.enqueue_while(|state| {
-                let Some((id, (file_index, byte_offset, items))) = writes.next() else {
+                let Some((file_index, byte_offset, items)) = writes.next() else {
                     return Ok(None);
                 };
 
@@ -223,7 +237,7 @@ impl<T: bytemuck::Pod + 'static> UniversalWrite<T> for IoUringFile {
                     }
                 })?;
 
-                let entry = state.write(id as _, file.fd(), byte_offset, items);
+                let entry = state.write((), file.fd(), byte_offset, items);
                 Ok(Some(entry))
             })?;
 
