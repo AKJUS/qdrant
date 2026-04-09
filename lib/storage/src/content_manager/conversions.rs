@@ -52,7 +52,7 @@ impl From<StorageError> for Status {
             StorageError::ShardUnavailable { .. } => tonic::Code::Unavailable,
             StorageError::EmptyPartialSnapshot { .. } => tonic::Code::FailedPrecondition,
         };
-        let mut status = Status::new(error_code, format!("{error}"));
+        let mut status = Status::new(error_code, error.to_string());
         // add metadata headers
         for (header_key, header_value) in metadata_headers {
             if let Ok(metadata) = MetadataValue::from_str(&header_value) {
@@ -97,8 +97,8 @@ impl TryFrom<grpc::CreateCollection> for CollectionMetaOperations {
                 sparse_vectors: sparse_vectors_config
                     .map(|v| SparseVectorsConfig::try_from(v).map(|SparseVectorsConfig(x)| x))
                     .transpose()?,
-                hnsw_config: hnsw_config.map(|v| v.into()),
-                wal_config: wal_config.map(|v| v.into()),
+                hnsw_config: hnsw_config.map(Into::into),
+                wal_config: wal_config.map(Into::into),
                 optimizers_config: optimizers_config.map(TryFrom::try_from).transpose()?,
                 shard_number,
                 on_disk_payload,

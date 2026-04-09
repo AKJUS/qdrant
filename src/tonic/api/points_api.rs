@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use api::grpc::Usage;
 use api::grpc::qdrant::points_server::Points;
 use api::grpc::qdrant::{
     ClearPayloadPoints, CountPoints, CountResponse, CreateFieldIndexCollection,
@@ -16,6 +15,7 @@ use api::grpc::qdrant::{
     SearchPoints, SearchResponse, SetPayloadPoints, UpdateBatchPoints, UpdateBatchResponse,
     UpdatePointVectors, UpsertPoints,
 };
+use api::grpc::{PointsOperationResponseInternal, Usage};
 use collection::operations::types::CoreSearchRequest;
 use common::counter::hardware_accumulator::HwMeasurementAcc;
 use storage::content_manager::toc::request_hw_counter::RequestHwCounter;
@@ -176,7 +176,7 @@ impl Points for PointsService {
             hw_metrics,
         )
         .await
-        .map(|resp| resp.map(Into::into))
+        .map(|resp| resp.map(PointsOperationResponseInternal::into))
     }
 
     async fn set_payload(
@@ -199,7 +199,7 @@ impl Points for PointsService {
             hw_metrics,
         )
         .await
-        .map(|resp| resp.map(Into::into))
+        .map(|resp| resp.map(PointsOperationResponseInternal::into))
     }
 
     async fn overwrite_payload(
@@ -222,7 +222,7 @@ impl Points for PointsService {
             hw_metrics,
         )
         .await
-        .map(|resp| resp.map(Into::into))
+        .map(|resp| resp.map(PointsOperationResponseInternal::into))
     }
 
     async fn delete_payload(
@@ -245,7 +245,7 @@ impl Points for PointsService {
             hw_metrics,
         )
         .await
-        .map(|resp| resp.map(Into::into))
+        .map(|resp| resp.map(PointsOperationResponseInternal::into))
     }
 
     async fn clear_payload(
@@ -268,7 +268,7 @@ impl Points for PointsService {
             hw_metrics,
         )
         .await
-        .map(|resp| resp.map(Into::into))
+        .map(|resp| resp.map(PointsOperationResponseInternal::into))
     }
 
     async fn update_batch(
@@ -316,7 +316,7 @@ impl Points for PointsService {
             hw_metrics,
         )
         .await
-        .map(|resp| resp.map(Into::into))
+        .map(|resp| resp.map(PointsOperationResponseInternal::into))
     }
 
     async fn delete_field_index(
@@ -334,7 +334,7 @@ impl Points for PointsService {
             auth,
         )
         .await
-        .map(|resp| resp.map(Into::into))
+        .map(|resp| resp.map(PointsOperationResponseInternal::into))
     }
 
     async fn search(
