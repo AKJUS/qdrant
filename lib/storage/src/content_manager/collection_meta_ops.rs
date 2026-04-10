@@ -14,6 +14,7 @@ use collection::shards::shard::{PeerId, ShardId, ShardsPlacement};
 use collection::shards::transfer::{ShardTransfer, ShardTransferKey, ShardTransferRestart};
 use collection::shards::{CollectionId, replica_set};
 use schemars::JsonSchema;
+use segment::data_types::vectors::DEFAULT_VECTOR_NAME;
 use segment::types::{
     Payload, PayloadFieldSchema, PayloadKeyType, QuantizationConfig, ShardKey, StrictModeConfig,
     VectorNameBuf,
@@ -195,6 +196,12 @@ impl CreateCollectionOperation {
     ) -> StorageResult<Self> {
         // validate vector names are unique between dense and sparse vectors
         if let Some(sparse_config) = &create_collection.sparse_vectors {
+            if sparse_config.contains_key(DEFAULT_VECTOR_NAME) {
+                return Err(StorageError::bad_input(
+                    "Sparse vector name cannot be empty",
+                ));
+            }
+
             let mut dense_names = create_collection.vectors.params_iter().map(|p| p.0);
             if let Some(duplicate_name) = dense_names.find(|name| sparse_config.contains_key(*name))
             {
