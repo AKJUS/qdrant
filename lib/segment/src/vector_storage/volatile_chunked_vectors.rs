@@ -174,7 +174,12 @@ impl<T: Clone> TrySetCapacityExact for VolatileChunkedVectors<T> {
         self.chunks.resize_with(num_chunks, Vec::new);
         for chunk_idx in 0..num_chunks {
             if chunk_idx == last_chunk_idx {
-                let desired_capacity = (capacity % self.chunk_capacity) * self.dim;
+                let remainder = capacity % self.chunk_capacity;
+                let desired_capacity = if remainder == 0 {
+                    self.chunk_capacity * self.dim
+                } else {
+                    remainder * self.dim
+                };
                 self.chunks[chunk_idx].try_set_capacity_exact(desired_capacity)?;
             } else {
                 let desired_capacity = self.chunk_capacity * self.dim;
@@ -187,7 +192,10 @@ impl<T: Clone> TrySetCapacityExact for VolatileChunkedVectors<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::mem;
+
     use super::*;
+    use crate::vector_storage::common::CHUNK_SIZE;
 
     #[test]
     fn test_chunked_vectors_with_skipped_chunks() {
@@ -216,5 +224,28 @@ mod tests {
         vectors.try_set_capacity_exact(0).unwrap();
         assert!(vectors.chunks.is_empty());
         assert_eq!(vectors.len(), 0);
+    }
+
+    /// Regression: when `capacity` is a multiple of `chunk_capacity`, the last chunk must still
+    /// reserve `chunk_capacity * dim` flattened elements. Using only `(capacity % chunk_capacity) * dim`
+    /// yields zero in that case and leaves the last chunk with no reserved capacity.
+    #[test]
+    fn try_set_capacity_exact_exact_multiple_of_chunk_reserves_full_last_chunk() {
+        let dim = 3;
+        let chunk_capacity = CHUNK_SIZE / (dim * mem::size_of::<u8>());
+        let mut vectors = VolatileChunkedVectors::<u8>::new(dim);
+
+        vectors
+            .try_set_capacity_exact(chunk_capacity)
+            .expect("single full chunk");
+        assert_eq!(vectors.chunks.len(), 1);
+        assert_eq!(vectors.chunks[0].capacity(), chunk_capacity * dim);
+
+        vectors
+            .try_set_capacity_exact(2 * chunk_capacity)
+            .expect("two full chunks");
+        assert_eq!(vectors.chunks.len(), 2);
+        assert_eq!(vectors.chunks[0].capacity(), chunk_capacity * dim);
+        assert_eq!(vectors.chunks[1].capacity(), chunk_capacity * dim);
     }
 }
