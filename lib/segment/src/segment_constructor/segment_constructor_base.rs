@@ -191,6 +191,19 @@ pub(crate) fn open_vector_storage(
             AdviceSetting::from(Advice::Normal),
             true,
         ),
+
+        // Empty placeholder storage, no files on disk
+        VectorStorageType::Empty => {
+            use crate::vector_storage::dense::empty_dense_vector_storage::new_empty_dense_vector_storage;
+            Ok(new_empty_dense_vector_storage(
+                vector_config.size,
+                vector_config.distance,
+                vector_config.datatype.unwrap_or_default(),
+                vector_config.storage_type.is_on_disk(),
+                vector_config.multivector_config,
+                0, // num_points set after id_tracker is loaded
+            ))
+        }
     }
 }
 
@@ -371,6 +384,10 @@ pub(crate) fn create_sparse_vector_storage(
             let mmap_storage = MmapSparseVectorStorage::open_or_create(path)?;
             Ok(VectorStorageEnum::SparseMmap(mmap_storage))
         }
+        SparseVectorStorageType::Empty => {
+            use crate::vector_storage::sparse::empty_sparse_vector_storage::new_empty_sparse_vector_storage;
+            Ok(new_empty_sparse_vector_storage(0))
+        }
     }
 }
 
@@ -451,14 +468,18 @@ fn create_segment(
         let vector_storage = vector_storages.remove(vector_name).unwrap();
 
         let vector_index_path = get_vector_index_path(segment_path, vector_name);
-        // Warn when number of points between ID tracker and storage differs
+        // Ensure vector storage is sized to match the id_tracker's point count.
+        // This can be out of sync when a named vector was added to an existing segment.
         let point_count = id_tracker.borrow().total_point_count();
         let vector_count = vector_storage.borrow().total_vector_count();
         if vector_count != point_count {
             log::debug!(
-                "Mismatch of point and vector counts ({point_count} != {vector_count}, storage: {})",
+                "Mismatch of point and vector counts ({point_count} != {vector_count}, storage: {}), pre-filling deleted entries",
                 vector_storage_path.display(),
             );
+            vector_storage
+                .borrow_mut()
+                .prefill_deleted_entries(point_count)?;
         }
 
         let started = Instant::now();
@@ -515,14 +536,18 @@ fn create_segment(
         let vector_index_path = get_vector_index_path(segment_path, vector_name);
         let vector_storage = vector_storages.remove(vector_name).unwrap();
 
-        // Warn when number of points between ID tracker and storage differs
+        // Ensure vector storage is sized to match the id_tracker's point count.
+        // This can be out of sync when a named vector was added to an existing segment.
         let point_count = id_tracker.borrow().total_point_count();
         let vector_count = vector_storage.borrow().total_vector_count();
         if vector_count != point_count {
             log::debug!(
-                "Mismatch of point and vector counts ({point_count} != {vector_count}, storage: {})",
+                "Mismatch of point and vector counts ({point_count} != {vector_count}, storage: {}), pre-filling deleted entries",
                 vector_storage_path.display(),
             );
+            vector_storage
+                .borrow_mut()
+                .prefill_deleted_entries(point_count)?;
         }
 
         let started = Instant::now();

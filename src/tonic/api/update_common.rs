@@ -28,7 +28,7 @@ use segment::types::{
 use storage::content_manager::toc::TableOfContent;
 use storage::content_manager::toc::request_hw_counter::RequestHwCounter;
 use storage::dispatcher::Dispatcher;
-use storage::rbac::Auth;
+use storage::rbac::{Access, Auth};
 use tonic::{Response, Status};
 
 use crate::common::inference::params::InferenceParams;
@@ -1018,4 +1018,152 @@ fn convert_field_type(
     };
 
     Ok(field_schema)
+}
+
+pub async fn create_vector_name(
+    dispatcher: Arc<Dispatcher>,
+    request: api::grpc::qdrant::CreateVectorNameRequest,
+    internal_params: InternalUpdateParams,
+    auth: Auth,
+    request_hw_counter: RequestHwCounter,
+) -> Result<Response<PointsOperationResponseInternal>, Status> {
+    let api::grpc::qdrant::CreateVectorNameRequest {
+        collection_name,
+        wait,
+        vector_name,
+        vector_config,
+        timeout,
+    } = request;
+
+    let config = segment::data_types::vector_name_config::VectorNameConfig::try_from(
+        vector_config.ok_or_else(|| {
+            Status::invalid_argument("vector_config is required (dense_config or sparse_config)")
+        })?,
+    )?;
+
+    let timing = Instant::now();
+    let result = do_create_vector_name(
+        dispatcher,
+        collection_name,
+        vector_name,
+        config,
+        internal_params,
+        UpdateParams::from_grpc(wait, None, timeout)?,
+        auth,
+        request_hw_counter.get_counter(),
+    )
+    .await?;
+
+    let response = points_operation_response_internal(timing, result, None);
+    Ok(Response::new(response))
+}
+
+pub async fn create_vector_name_internal(
+    toc: Arc<TableOfContent>,
+    request: api::grpc::qdrant::CreateVectorNameRequest,
+    internal_params: InternalUpdateParams,
+) -> Result<Response<PointsOperationResponseInternal>, Status> {
+    let api::grpc::qdrant::CreateVectorNameRequest {
+        collection_name,
+        wait,
+        vector_name,
+        vector_config,
+        timeout,
+    } = request;
+
+    let config = segment::data_types::vector_name_config::VectorNameConfig::try_from(
+        vector_config.ok_or_else(|| {
+            Status::invalid_argument("vector_config is required (dense_config or sparse_config)")
+        })?,
+    )?;
+
+    let operation = CollectionUpdateOperations::VectorNameOperation(
+        shard::operations::VectorNameOperations::CreateVectorName(
+            shard::operations::CreateVectorName {
+                vector_name,
+                config,
+            },
+        ),
+    );
+
+    let timing = Instant::now();
+    let result = update(
+        &toc,
+        &collection_name,
+        operation,
+        internal_params,
+        UpdateParams::from_grpc(wait, None, timeout)?,
+        None,
+        Auth::new_internal(Access::full("Internal API")),
+        HwMeasurementAcc::disposable(),
+    )
+    .await?;
+
+    let response = points_operation_response_internal(timing, result, None);
+    Ok(Response::new(response))
+}
+
+pub async fn delete_vector_name_internal(
+    toc: Arc<TableOfContent>,
+    request: api::grpc::qdrant::DeleteVectorNameRequest,
+    internal_params: InternalUpdateParams,
+) -> Result<Response<PointsOperationResponseInternal>, Status> {
+    let api::grpc::qdrant::DeleteVectorNameRequest {
+        collection_name,
+        wait,
+        vector_name,
+        timeout,
+    } = request;
+
+    let operation = CollectionUpdateOperations::VectorNameOperation(
+        shard::operations::VectorNameOperations::DeleteVectorName(
+            shard::operations::DeleteVectorName { vector_name },
+        ),
+    );
+
+    let timing = Instant::now();
+    let result = update(
+        &toc,
+        &collection_name,
+        operation,
+        internal_params,
+        UpdateParams::from_grpc(wait, None, timeout)?,
+        None,
+        Auth::new_internal(Access::full("Internal API")),
+        HwMeasurementAcc::disposable(),
+    )
+    .await?;
+
+    let response = points_operation_response_internal(timing, result, None);
+    Ok(Response::new(response))
+}
+
+pub async fn delete_vector_name(
+    dispatcher: Arc<Dispatcher>,
+    request: api::grpc::qdrant::DeleteVectorNameRequest,
+    internal_params: InternalUpdateParams,
+    auth: Auth,
+    request_hw_counter: RequestHwCounter,
+) -> Result<Response<PointsOperationResponseInternal>, Status> {
+    let api::grpc::qdrant::DeleteVectorNameRequest {
+        collection_name,
+        wait,
+        vector_name,
+        timeout,
+    } = request;
+
+    let timing = Instant::now();
+    let result = do_delete_vector_name(
+        dispatcher,
+        collection_name,
+        vector_name,
+        internal_params,
+        UpdateParams::from_grpc(wait, None, timeout)?,
+        auth,
+        request_hw_counter.get_counter(),
+    )
+    .await?;
+
+    let response = points_operation_response_internal(timing, result, None);
+    Ok(Response::new(response))
 }

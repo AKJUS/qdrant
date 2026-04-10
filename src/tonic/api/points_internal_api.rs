@@ -7,13 +7,14 @@ use api::grpc::HardwareUsage;
 use api::grpc::qdrant::points_internal_server::PointsInternal;
 use api::grpc::qdrant::{
     ClearPayloadPointsInternal, CoreSearchBatchPointsInternal, CountPointsInternal, CountResponse,
-    CreateFieldIndexCollectionInternal, DeleteFieldIndexCollectionInternal,
-    DeletePayloadPointsInternal, DeletePointsInternal, DeleteVectorsInternal, FacetCountsInternal,
-    FacetResponseInternal, GetPointsInternal, GetResponse, IntermediateResult,
-    PointsOperationResponseInternal, QueryBatchPointsInternal, QueryBatchResponseInternal,
-    QueryResultInternal, QueryShardPoints, RecommendPointsInternal, RecommendResponse,
-    ScrollPointsInternal, ScrollResponse, SearchBatchResponse, SetPayloadPointsInternal,
-    SyncPointsInternal, UpdateBatchInternal, UpdateVectorsInternal, UpsertPointsInternal,
+    CreateFieldIndexCollectionInternal, CreateVectorNameInternal,
+    DeleteFieldIndexCollectionInternal, DeletePayloadPointsInternal, DeletePointsInternal,
+    DeleteVectorNameInternal, DeleteVectorsInternal, FacetCountsInternal, FacetResponseInternal,
+    GetPointsInternal, GetResponse, IntermediateResult, PointsOperationResponseInternal,
+    QueryBatchPointsInternal, QueryBatchResponseInternal, QueryResultInternal, QueryShardPoints,
+    RecommendPointsInternal, RecommendResponse, ScrollPointsInternal, ScrollResponse,
+    SearchBatchResponse, SetPayloadPointsInternal, SyncPointsInternal, UpdateBatchInternal,
+    UpdateVectorsInternal, UpsertPointsInternal,
 };
 use api::grpc::update_operation::Update;
 use collection::operations::shard_selector_internal::ShardSelectorInternal;
@@ -346,6 +347,44 @@ impl PointsInternalService {
         )
         .await
     }
+
+    async fn create_vector_name_internal(
+        &self,
+        request: CreateVectorNameInternal,
+    ) -> Result<Response<PointsOperationResponseInternal>, Status> {
+        let CreateVectorNameInternal {
+            create_vector_name,
+            shard_id,
+            clock_tag,
+            wait_override,
+        } = request;
+
+        create_vector_name_internal(
+            self.toc.clone(),
+            extract_internal_request(create_vector_name)?,
+            InternalUpdateParams::from_grpc(shard_id, clock_tag, wait_override),
+        )
+        .await
+    }
+
+    async fn delete_vector_name_internal(
+        &self,
+        request: DeleteVectorNameInternal,
+    ) -> Result<Response<PointsOperationResponseInternal>, Status> {
+        let DeleteVectorNameInternal {
+            delete_vector_name,
+            shard_id,
+            clock_tag,
+            wait_override,
+        } = request;
+
+        delete_vector_name_internal(
+            self.toc.clone(),
+            extract_internal_request(delete_vector_name)?,
+            InternalUpdateParams::from_grpc(shard_id, clock_tag, wait_override),
+        )
+        .await
+    }
 }
 
 pub async fn query_batch_internal(
@@ -566,6 +605,24 @@ impl PointsInternal for PointsInternalService {
         self.delete_field_index_internal(request.into_inner()).await
     }
 
+    async fn create_vector_name(
+        &self,
+        request: Request<CreateVectorNameInternal>,
+    ) -> Result<Response<PointsOperationResponseInternal>, Status> {
+        validate_and_log(request.get_ref());
+
+        self.create_vector_name_internal(request.into_inner()).await
+    }
+
+    async fn delete_vector_name(
+        &self,
+        request: Request<DeleteVectorNameInternal>,
+    ) -> Result<Response<PointsOperationResponseInternal>, Status> {
+        validate_and_log(request.get_ref());
+
+        self.delete_vector_name_internal(request.into_inner()).await
+    }
+
     async fn update_batch(
         &self,
         request: Request<UpdateBatchInternal>,
@@ -624,6 +681,12 @@ impl PointsInternal for PointsInternalService {
                     Update::DeleteFieldIndex(inner) => {
                         inner.wait_override.get_or_insert(batch_wo);
                     }
+                    Update::CreateVectorName(inner) => {
+                        inner.wait_override.get_or_insert(batch_wo);
+                    }
+                    Update::DeleteVectorName(inner) => {
+                        inner.wait_override.get_or_insert(batch_wo);
+                    }
                 }
             }
 
@@ -665,6 +728,8 @@ impl PointsInternal for PointsInternalService {
                     Update::DeleteFieldIndex(delete_field_index) => {
                         self.delete_field_index_internal(delete_field_index).await?
                     }
+                    Update::CreateVectorName(op) => self.create_vector_name_internal(op).await?,
+                    Update::DeleteVectorName(op) => self.delete_vector_name_internal(op).await?,
                 },
             };
             let mut response = result.into_inner();

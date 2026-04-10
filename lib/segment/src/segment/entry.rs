@@ -22,6 +22,7 @@ use crate::data_types::query_context::{
     FormulaContext, QueryContext, QueryIdfStats, SegmentQueryContext,
 };
 use crate::data_types::segment_record::{NamedVectorsOwned, SegmentRecord};
+use crate::data_types::vector_name_config::VectorNameConfig;
 use crate::data_types::vectors::{QueryVector, VectorInternal};
 use crate::entry::entry_point::{
     NonAppendableSegmentEntry, ReadSegmentEntry, SegmentEntry, StorageSegmentEntry,
@@ -969,6 +970,27 @@ impl NonAppendableSegmentEntry for Segment {
                 .set_payload_index_schema(&key, Some(op_num));
 
             Ok(true)
+        })
+    }
+
+    fn create_vector_name(
+        &mut self,
+        op_num: SeqNumberType,
+        vector_name: &VectorName,
+        vector_config: &VectorNameConfig,
+    ) -> OperationResult<bool> {
+        self.handle_segment_version_and_failure(op_num, |segment| {
+            segment.create_vector_name_impl(op_num, vector_name, vector_config)
+        })
+    }
+
+    fn delete_vector_name(
+        &mut self,
+        op_num: SeqNumberType,
+        vector_name: &VectorName,
+    ) -> OperationResult<bool> {
+        self.handle_segment_version_and_failure(op_num, |segment| {
+            segment.delete_vector_name_impl(op_num, vector_name)
         })
     }
 }

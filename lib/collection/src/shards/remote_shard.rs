@@ -60,14 +60,17 @@ use crate::operations::types::{
 };
 use crate::operations::universal_query::shard_query::{ShardQueryRequest, ShardQueryResponse};
 use crate::operations::vector_ops::VectorOperations;
-use crate::operations::{CollectionUpdateOperations, FieldIndexOperations, OperationWithClockTag};
+use crate::operations::{
+    CollectionUpdateOperations, FieldIndexOperations, OperationWithClockTag, VectorNameOperations,
+};
 use crate::shards::CollectionId;
 use crate::shards::channel_service::ChannelService;
 use crate::shards::conversions::{
     internal_clear_payload, internal_clear_payload_by_filter, internal_create_index,
-    internal_delete_index, internal_delete_payload, internal_delete_points,
-    internal_delete_points_by_filter, internal_set_payload, internal_sync_points,
-    internal_upsert_points, try_scored_point_from_grpc, wait_override_to_proto,
+    internal_create_vector_name, internal_delete_index, internal_delete_payload,
+    internal_delete_points, internal_delete_points_by_filter, internal_delete_vector_name,
+    internal_set_payload, internal_sync_points, internal_upsert_points, try_scored_point_from_grpc,
+    wait_override_to_proto,
 };
 use crate::shards::replica_set::replica_set_state::ReplicaState;
 use crate::shards::shard::{PeerId, ShardId};
@@ -444,6 +447,32 @@ impl RemoteShard {
                         }
                     }
                 }
+                CollectionUpdateOperations::VectorNameOperation(vector_name_op) => {
+                    match vector_name_op {
+                        VectorNameOperations::CreateVectorName(create) => {
+                            let request = internal_create_vector_name(
+                                shard_id,
+                                operation.clock_tag,
+                                collection_name.clone(),
+                                create,
+                                wait,
+                                timeout,
+                            );
+                            Update::CreateVectorName(request)
+                        }
+                        VectorNameOperations::DeleteVectorName(delete) => {
+                            let request = internal_delete_vector_name(
+                                shard_id,
+                                operation.clock_tag,
+                                collection_name.clone(),
+                                delete,
+                                wait,
+                                timeout,
+                            );
+                            Update::DeleteVectorName(request)
+                        }
+                    }
+                }
                 #[cfg(feature = "staging")]
                 CollectionUpdateOperations::StagingOperation(_) => {
                     // Staging operations should not be forwarded to remote shards
@@ -798,6 +827,43 @@ impl RemoteShard {
                     self.with_points_client(|mut client| async move {
                         client
                             .delete_field_index(tonic::Request::new(request.clone()))
+                            .await
+                    })
+                    .await?
+                    .into_inner()
+                }
+            },
+            CollectionUpdateOperations::VectorNameOperation(vector_name_op) => match vector_name_op
+            {
+                VectorNameOperations::CreateVectorName(create) => {
+                    let request = &internal_create_vector_name(
+                        shard_id,
+                        operation.clock_tag,
+                        collection_name,
+                        create,
+                        wait,
+                        timeout,
+                    );
+                    self.with_points_client(|mut client| async move {
+                        client
+                            .create_vector_name(tonic::Request::new(request.clone()))
+                            .await
+                    })
+                    .await?
+                    .into_inner()
+                }
+                VectorNameOperations::DeleteVectorName(delete) => {
+                    let request = &internal_delete_vector_name(
+                        shard_id,
+                        operation.clock_tag,
+                        collection_name,
+                        delete,
+                        wait,
+                        timeout,
+                    );
+                    self.with_points_client(|mut client| async move {
+                        client
+                            .delete_vector_name(tonic::Request::new(request.clone()))
                             .await
                     })
                     .await?

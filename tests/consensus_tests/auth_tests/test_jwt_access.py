@@ -286,6 +286,22 @@ ACTION_ACCESS = {
         "qdrant.Points/DeleteFieldIndex",
         coll_prw=False,
     ),
+    "create_vector_name": EndpointAccess(
+        False,
+        True,
+        True,
+        "PUT /collections/{collection_name}/vectors/{vector_name}",
+        "qdrant.Points/CreateVectorName",
+        coll_prw=False,
+    ),
+    "delete_vector_name": EndpointAccess(
+        False,
+        True,
+        True,
+        "DELETE /collections/{collection_name}/vectors/{vector_name}",
+        "qdrant.Points/DeleteVectorName",
+        coll_prw=False,
+    ),
     ### Collection Snapshots ###
     "list_collection_snapshots": EndpointAccess(
         True,
@@ -1277,6 +1293,27 @@ def test_delete_index():
         "delete_index",
         path_params={"collection_name": COLL_NAME, "field_name": "fake_field_name"},
         grpc_request={"collection_name": COLL_NAME, "field_name": "fake_field_name"},
+    )
+
+
+def test_create_vector_name():
+    check_access(
+        "create_vector_name",
+        rest_request={"dense": {"size": 4, "distance": "Cosine"}},
+        path_params={"collection_name": COLL_NAME, "vector_name": "new_vec"},
+        grpc_request={
+            "collection_name": COLL_NAME,
+            "vector_name": "new_vec",
+            "dense_config": {"size": 4, "distance": 1},
+        },
+    )
+
+
+def test_delete_vector_name():
+    check_access(
+        "delete_vector_name",
+        path_params={"collection_name": COLL_NAME, "vector_name": "fake_vector_name"},
+        grpc_request={"collection_name": COLL_NAME, "vector_name": "fake_vector_name"},
     )
 
 

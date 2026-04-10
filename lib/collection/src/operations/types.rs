@@ -1515,6 +1515,38 @@ impl VectorsConfig {
         }
     }
 
+    /// Insert or replace a named vector. Converts `Single` to `Multi` if needed.
+    pub fn insert(&mut self, name: VectorNameBuf, params: VectorParams) {
+        match self {
+            VectorsConfig::Single(_) => {
+                let mut multi = BTreeMap::new();
+                if let VectorsConfig::Single(existing) =
+                    std::mem::replace(self, VectorsConfig::empty())
+                {
+                    multi.insert(DEFAULT_VECTOR_NAME.to_owned(), existing);
+                }
+                multi.insert(name, params);
+                *self = VectorsConfig::Multi(multi);
+            }
+            VectorsConfig::Multi(vectors) => {
+                vectors.insert(name, params);
+            }
+        }
+    }
+
+    /// Remove a named vector. Converts `Single` to empty `Multi` if name matches.
+    pub fn remove(&mut self, name: &VectorName) {
+        match self {
+            VectorsConfig::Single(_) if name == DEFAULT_VECTOR_NAME => {
+                *self = VectorsConfig::Multi(Default::default());
+            }
+            VectorsConfig::Single(_) => {}
+            VectorsConfig::Multi(vectors) => {
+                vectors.remove(name);
+            }
+        }
+    }
+
     pub fn get_params_mut(&mut self, name: &VectorName) -> Option<&mut VectorParams> {
         match self {
             VectorsConfig::Single(params) => (name == DEFAULT_VECTOR_NAME).then_some(params),
@@ -1534,30 +1566,6 @@ impl VectorsConfig {
         }
     }
 
-    // TODO: Further unify `check_compatible` and `check_compatible_with_segment_config`?
-    pub fn check_compatible(&self, other: &Self) -> CollectionResult<()> {
-        match (self, other) {
-            (Self::Single(_), Self::Single(_)) | (Self::Multi(_), Self::Multi(_)) => (),
-            _ => {
-                return Err(incompatible_vectors_error(
-                    self.params_iter().map(|(name, _)| name),
-                    other.params_iter().map(|(name, _)| name),
-                ));
-            }
-        };
-
-        for (vector_name, this) in self.params_iter() {
-            let Some(other) = other.get_params(vector_name) else {
-                return Err(missing_vector_error(vector_name));
-            };
-
-            VectorParamsBase::from(this).check_compatibility(&other.into(), vector_name)?;
-        }
-
-        Ok(())
-    }
-
-    // TODO: Further unify `check_compatible` and `check_compatible_with_segment_config`?
     pub fn check_compatible_with_segment_config(
         &self,
         other: &HashMap<VectorNameBuf, segment::types::VectorDataConfig>,

@@ -13,6 +13,7 @@ mod sharding_keys;
 mod snapshots;
 mod state_management;
 mod telemetry;
+mod vector_name_schema;
 
 use std::collections::HashMap;
 use std::ops::Deref;

@@ -4,6 +4,7 @@ mod chunked_vectors;
 pub mod common;
 pub mod dense;
 pub mod multi_dense;
+mod prefill_deleted;
 pub mod quantized;
 pub mod query;
 pub mod query_scorer;

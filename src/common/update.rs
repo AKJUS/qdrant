@@ -918,10 +918,6 @@ pub async fn do_create_index(
         .submit_collection_meta_op(consensus_op, auth, params.timeout)
         .await?;
 
-    // This function is required as long as we want to maintain interface compatibility
-    // for `wait` parameter and return type.
-    // The idea is to migrate from the point-like interface to consensus-like interface in the next few versions
-
     do_create_index_internal(
         toc,
         collection_name,
@@ -1031,6 +1027,146 @@ pub async fn do_delete_index_internal(
 }
 
 #[expect(clippy::too_many_arguments)]
+pub async fn do_create_vector_name(
+    dispatcher: Arc<Dispatcher>,
+    collection_name: String,
+    vector_name: String,
+    config: VectorNameConfig,
+    internal_params: InternalUpdateParams,
+    params: UpdateParams,
+    auth: Auth,
+    hw_measurement_acc: HwMeasurementAcc,
+) -> Result<UpdateResult, StorageError> {
+    use collection::operations::verification::new_unchecked_verification_pass;
+
+    // Validate the vector name once at the single chokepoint that both REST and
+    // gRPC entrypoints land in (REST also runs the same check via `VectorNamePath`).
+    common::validation::validate_vector_name(&vector_name).map_err(|err| {
+        StorageError::bad_input(format!("Invalid vector name `{vector_name}`: {err}"))
+    })?;
+
+    let consensus_op = CreateNamedVector {
+        collection_name: collection_name.clone(),
+        vector_name: vector_name.clone(),
+        config: config.clone(),
+    };
+
+    let pass = new_unchecked_verification_pass();
+    let toc = dispatcher.toc(&auth, &pass).clone();
+
+    dispatcher
+        .submit_collection_meta_op(
+            CollectionMetaOperations::CreateNamedVector(consensus_op),
+            auth,
+            params.timeout,
+        )
+        .await?;
+
+    do_create_vector_name_internal(
+        toc,
+        collection_name,
+        vector_name,
+        config,
+        internal_params,
+        params,
+        hw_measurement_acc,
+    )
+    .await
+}
+
+pub async fn do_create_vector_name_internal(
+    toc: Arc<TableOfContent>,
+    collection_name: String,
+    vector_name: String,
+    config: segment::data_types::vector_name_config::VectorNameConfig,
+    internal_params: InternalUpdateParams,
+    params: UpdateParams,
+    hw_measurement_acc: HwMeasurementAcc,
+) -> Result<UpdateResult, StorageError> {
+    let operation = CollectionUpdateOperations::VectorNameOperation(
+        VectorNameOperations::CreateVectorName(CreateVectorName {
+            vector_name,
+            config,
+        }),
+    );
+
+    update(
+        &toc,
+        &collection_name,
+        operation,
+        internal_params,
+        params,
+        None,
+        Auth::new_internal(Access::full("Internal API")),
+        hw_measurement_acc,
+    )
+    .await
+}
+
+pub async fn do_delete_vector_name(
+    dispatcher: Arc<Dispatcher>,
+    collection_name: String,
+    vector_name: String,
+    internal_params: InternalUpdateParams,
+    params: UpdateParams,
+    auth: Auth,
+    hw_measurement_acc: HwMeasurementAcc,
+) -> Result<UpdateResult, StorageError> {
+    use collection::operations::verification::new_unchecked_verification_pass;
+
+    let consensus_op = DeleteNamedVector {
+        collection_name: collection_name.clone(),
+        vector_name: vector_name.clone(),
+    };
+
+    let pass = new_unchecked_verification_pass();
+    let toc = dispatcher.toc(&auth, &pass).clone();
+
+    dispatcher
+        .submit_collection_meta_op(
+            CollectionMetaOperations::DeleteNamedVector(consensus_op),
+            auth,
+            params.timeout,
+        )
+        .await?;
+
+    do_delete_vector_name_internal(
+        toc,
+        collection_name,
+        vector_name,
+        internal_params,
+        params,
+        hw_measurement_acc,
+    )
+    .await
+}
+
+pub async fn do_delete_vector_name_internal(
+    toc: Arc<TableOfContent>,
+    collection_name: String,
+    vector_name: String,
+    internal_params: InternalUpdateParams,
+    params: UpdateParams,
+    hw_measurement_acc: HwMeasurementAcc,
+) -> Result<UpdateResult, StorageError> {
+    let operation = CollectionUpdateOperations::VectorNameOperation(
+        VectorNameOperations::DeleteVectorName(DeleteVectorName { vector_name }),
+    );
+
+    update(
+        &toc,
+        &collection_name,
+        operation,
+        internal_params,
+        params,
+        None,
+        Auth::new_internal(Access::full("Internal API")),
+        hw_measurement_acc,
+    )
+    .await
+}
+
+#[expect(clippy::too_many_arguments)]
 pub async fn update(
     toc: &TableOfContent,
     collection_name: &str,
@@ -1073,7 +1209,8 @@ pub async fn update(
             }
         }
 
-        CollectionUpdateOperations::FieldIndexOperation(_) => {
+        CollectionUpdateOperations::FieldIndexOperation(_)
+        | CollectionUpdateOperations::VectorNameOperation(_) => {
             debug_assert_eq!(
                 shard_key, None,
                 "Field index operations can't specify shard key"
@@ -1084,8 +1221,18 @@ pub async fn update(
                 None => ShardSelectorInternal::All,
             }
         }
-
-        _ => get_shard_selector_for_update(shard_id, shard_key),
+        CollectionUpdateOperations::VectorOperation(_)
+        | CollectionUpdateOperations::PointOperation(PointOperations::UpsertPoints(_))
+        | CollectionUpdateOperations::PointOperation(PointOperations::UpsertPointsConditional(_))
+        | CollectionUpdateOperations::PointOperation(PointOperations::DeletePoints { .. })
+        | CollectionUpdateOperations::PointOperation(PointOperations::DeletePointsByFilter(_))
+        | CollectionUpdateOperations::PayloadOperation(_) => {
+            get_shard_selector_for_update(shard_id, shard_key)
+        }
+        #[cfg(feature = "staging")]
+        CollectionUpdateOperations::StagingOperation(_) => {
+            get_shard_selector_for_update(shard_id, shard_key)
+        }
     };
 
     toc.update(
