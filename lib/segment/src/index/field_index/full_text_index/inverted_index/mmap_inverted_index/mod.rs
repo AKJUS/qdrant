@@ -6,7 +6,7 @@ use common::counter::hardware_counter::HardwareCounterCell;
 use common::mmap::{self, AdviceSetting, MmapSlice, create_and_ensure_length};
 use common::mmap_hashmap::{MmapHashMap, READ_ENTRY_OVERHEAD};
 use common::types::PointOffsetType;
-use common::universal_io::OpenOptions;
+use common::universal_io::{MmapFile, OpenOptions};
 use itertools::Either;
 use mmap_postings::{MmapPostingValue, MmapPostings};
 
@@ -19,7 +19,7 @@ use super::postings_iterator::{
 };
 use super::{InvertedIndex, ParsedQuery, TokenId, TokenSet};
 use crate::common::Flusher;
-use crate::common::mmap_bitslice_buffered_update_wrapper::MmapBitSliceBufferedUpdateWrapper;
+use crate::common::buffered_update_bitslice::BufferedUpdateBitSlice;
 use crate::common::operation_error::{OperationError, OperationResult};
 use crate::common::stored_bitslice::MmapBitSlice;
 use crate::index::field_index::full_text_index::inverted_index::Document;
@@ -48,7 +48,7 @@ pub(in crate::index::field_index::full_text_index) struct Storage {
     pub(in crate::index::field_index::full_text_index) vocab: MmapHashMap<str, TokenId>,
     pub(in crate::index::field_index::full_text_index) point_to_tokens_count: MmapSlice<usize>,
     pub(in crate::index::field_index::full_text_index) deleted_points:
-        MmapBitSliceBufferedUpdateWrapper,
+        BufferedUpdateBitSlice<MmapFile>,
 }
 
 impl MmapInvertedIndex {
@@ -151,7 +151,7 @@ impl MmapInvertedIndex {
             },
         )?;
         let num_deleted_points = deleted.count_ones()?;
-        let deleted_points = MmapBitSliceBufferedUpdateWrapper::new(deleted);
+        let deleted_points = BufferedUpdateBitSlice::new(deleted);
         let points_count = point_to_tokens_count.len() - num_deleted_points;
 
         Ok(Some(Self {
