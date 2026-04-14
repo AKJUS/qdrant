@@ -3,6 +3,7 @@ pub mod async_raw_scorer;
 mod chunked_vectors;
 pub mod common;
 pub mod dense;
+mod memory_reporter;
 pub mod multi_dense;
 mod prefill_deleted;
 pub mod quantized;

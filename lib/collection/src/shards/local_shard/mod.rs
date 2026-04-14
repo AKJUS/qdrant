@@ -72,6 +72,7 @@ use crate::collection_manager::optimizers::TrackerLog;
 use crate::collection_manager::optimizers::segment_optimizer::plan_optimizations;
 use crate::collection_manager::segments_searcher::SegmentsSearcher;
 use crate::common::file_utils::{move_dir, move_file};
+use crate::common::memory_reporter::CollectionMemoryReport;
 use crate::config::CollectionConfigInternal;
 use crate::operations::OperationWithClockTag;
 use crate::operations::shared_storage_config::SharedStorageConfig;
@@ -1090,6 +1091,25 @@ impl LocalShard {
         (ShardStatus::Green, OptimizersStatus::Ok)
     }
 
+    pub async fn memory_report(&self) -> CollectionResult<CollectionMemoryReport> {
+        let segments = self.segments.clone();
+        tokio::task::spawn_blocking(move || {
+            let segments_read = segments.read();
+            let mut reports = Vec::new();
+
+            // Collect from all segments, including those wrapped in proxies.
+            // During optimization, original segments become proxy-wrapped while
+            // a new empty segment is built. We must report from both.
+            for (_id, locked_segment) in segments_read.iter() {
+                collect_memory_reports(locked_segment, &mut reports)?;
+            }
+
+            Ok(CollectionMemoryReport::merge_all(reports))
+        })
+        .await
+        .map_err(|e| CollectionError::service_error(format!("Memory report task failed: {e}")))?
+    }
+
     pub async fn local_shard_info(&self) -> ShardInfoInternal {
         let collection_config = self.collection_config.read().await.clone();
 
@@ -1464,6 +1484,30 @@ fn desired_vector_names_from_config(
             ));
         }
     }
-
     desired
+}
+
+/// Recursively collect memory reports from a `LockedSegment`.
+///
+/// For `Original` segments, collects directly.
+/// For `Proxy` segments, collects from the wrapped segment
+/// (which is the real data holder during optimization).
+fn collect_memory_reports(
+    locked_segment: &LockedSegment,
+    reports: &mut Vec<CollectionMemoryReport>,
+) -> CollectionResult<()> {
+    match locked_segment {
+        LockedSegment::Original(segment) => {
+            let segment_guard = segment.read();
+            let seg_report = segment_guard.memory_report();
+            reports.push(crate::common::memory_reporter::report_from_segment(
+                seg_report,
+            )?);
+        }
+        LockedSegment::Proxy(proxy) => {
+            let proxy_guard = proxy.read();
+            collect_memory_reports(&proxy_guard.wrapped_segment, reports)?;
+        }
+    }
+    Ok(())
 }

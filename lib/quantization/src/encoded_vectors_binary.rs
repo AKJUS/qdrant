@@ -944,6 +944,17 @@ impl<TBitsStoreType: BitsStoreType, TStorage: EncodedStorage> EncodedVectors
         files
     }
 
+    fn heap_size_bytes(&self) -> usize {
+        let storage_heap = self.encoded_vectors.heap_size_bytes();
+        let vector_stats_heap = self
+            .metadata
+            .vector_stats
+            .as_ref()
+            .map(|vs| vs.elements_stats.capacity() * std::mem::size_of::<VectorElementStats>())
+            .unwrap_or(0);
+        storage_heap + vector_stats_heap
+    }
+
     type SupportsBytes = True;
 
     fn score_bytes(

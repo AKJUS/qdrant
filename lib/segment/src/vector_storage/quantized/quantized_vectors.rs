@@ -172,6 +172,32 @@ impl QuantizedVectorStorage {
     }
 }
 
+impl QuantizedVectorStorage {
+    /// Heap memory used by this storage that is not tracked in files.
+    pub fn heap_size_bytes(&self) -> usize {
+        match &self {
+            QuantizedVectorStorage::ScalarRam(q) => q.heap_size_bytes(),
+            QuantizedVectorStorage::ScalarMmap(q) => q.heap_size_bytes(),
+            QuantizedVectorStorage::ScalarChunkedMmap(q) => q.heap_size_bytes(),
+            QuantizedVectorStorage::PQRam(q) => q.heap_size_bytes(),
+            QuantizedVectorStorage::PQMmap(q) => q.heap_size_bytes(),
+            QuantizedVectorStorage::PQChunkedMmap(q) => q.heap_size_bytes(),
+            QuantizedVectorStorage::BinaryRam(q) => q.heap_size_bytes(),
+            QuantizedVectorStorage::BinaryMmap(q) => q.heap_size_bytes(),
+            QuantizedVectorStorage::BinaryChunkedMmap(q) => q.heap_size_bytes(),
+            QuantizedVectorStorage::ScalarRamMulti(q) => q.heap_size_bytes(),
+            QuantizedVectorStorage::ScalarMmapMulti(q) => q.heap_size_bytes(),
+            QuantizedVectorStorage::ScalarChunkedMmapMulti(q) => q.heap_size_bytes(),
+            QuantizedVectorStorage::PQRamMulti(q) => q.heap_size_bytes(),
+            QuantizedVectorStorage::PQMmapMulti(q) => q.heap_size_bytes(),
+            QuantizedVectorStorage::PQChunkedMmapMulti(q) => q.heap_size_bytes(),
+            QuantizedVectorStorage::BinaryRamMulti(q) => q.heap_size_bytes(),
+            QuantizedVectorStorage::BinaryMmapMulti(q) => q.heap_size_bytes(),
+            QuantizedVectorStorage::BinaryChunkedMmapMulti(q) => q.heap_size_bytes(),
+        }
+    }
+}
+
 impl fmt::Debug for QuantizedVectorStorage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("QuantizedVectorStorage").finish()
@@ -1979,6 +2005,25 @@ impl QuantizedVectors {
             Ok(quantization_storage.upsert_vector(id, vector.flattened_vectors, hw_counter)?)
         } else {
             Err(OperationError::WrongMulti)
+        }
+    }
+}
+
+impl crate::common::memory_usage::MemoryReporter for QuantizedVectors {
+    fn memory_usage(&self) -> crate::common::memory_usage::ComponentMemoryUsage {
+        use crate::common::memory_usage::{ComponentMemoryUsage, FileStorageIntent};
+
+        let files = self.files();
+        let heap_bytes = self.storage_impl.heap_size_bytes() as u64;
+
+        // Either always_ram, then we only load on in ram and track heap_bytes
+        // Or full on_disk, and we don't preload anything
+        let intent = FileStorageIntent::OnDisk;
+
+        if heap_bytes > 0 {
+            ComponentMemoryUsage::from_files_and_ram(files, intent, heap_bytes)
+        } else {
+            ComponentMemoryUsage::from_files(files, intent)
         }
     }
 }
