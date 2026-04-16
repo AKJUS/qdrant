@@ -468,6 +468,16 @@ impl Drop for QueueProxyShard {
     }
 }
 
+/// A batch of WAL operations read for transfer.
+struct WalBatch {
+    /// Operations in this batch: (WAL index, operation).
+    batch: Vec<(u64, OperationWithClockTag)>,
+    /// Whether this batch reaches the end of the WAL.
+    reached_end: bool,
+    /// Total number of items to transfer (for progress reporting).
+    total: u64,
+}
+
 struct Inner {
     /// Wrapped local shard to operate on.
     pub(super) wrapped_shard: LocalShard,
@@ -532,6 +542,9 @@ impl Inner {
 
     /// Transfer all updates that the remote missed from WAL
     ///
+    /// Uses pipelining to overlap WAL reads with network sends: while the current batch is being
+    /// sent to the remote, the next batch is read from the WAL concurrently.
+    ///
     /// # Cancel safety
     ///
     /// This method is cancel safe.
@@ -542,7 +555,42 @@ impl Inner {
     /// likely won't be updated. In the worst case this might cause double sending operations.
     /// This should be fine as operations are idempotent.
     pub async fn transfer_all_missed_updates(&self) -> CollectionResult<()> {
-        while !self.transfer_wal_batch().await? {}
+        let mut update_lock = None;
+        // First read not under `update_lock`
+        let mut batch = self
+            .read_wal_batch(self.transfer_from.load(Ordering::Relaxed))
+            .await?;
+
+        loop {
+            // Once a batch reaches the end of the WAL (or appears empty), acquire `update_lock`
+            // and hold it for the rest of the transfer so no new writes can accumulate.
+            // If the batch was empty without the lock, re-read under lock to confirm — otherwise
+            // a concurrent write could have committed between our read and our return.
+            if (batch.batch.is_empty() || batch.reached_end) && update_lock.is_none() {
+                update_lock = Some(self.update_lock.lock().await);
+                if batch.batch.is_empty() {
+                    batch = self
+                        .read_wal_batch(self.transfer_from.load(Ordering::Relaxed))
+                        .await?;
+                }
+            }
+
+            if batch.batch.is_empty() {
+                break;
+            }
+
+            // Send the current batch and prefetch the next one concurrently. This overlaps the
+            // network round-trip with the WAL read for the next batch.
+            // Note: this temporarily holds two batches in memory (~2x MAX_BATCH_BYTES).
+            let is_last = batch.reached_end;
+            let next_from = batch.batch.last().unwrap().0 + 1;
+            let (send_result, read_result) = tokio::join!(
+                self.send_wal_batch(&batch, is_last),
+                self.read_wal_batch(next_from),
+            );
+            send_result?;
+            batch = read_result?;
+        }
 
         // Set the WAL version to keep to the next item we should transfer
         let transfer_from = self.transfer_from.load(Ordering::Relaxed);
@@ -551,71 +599,68 @@ impl Inner {
         Ok(())
     }
 
-    /// Grab and transfer single new batch of updates from the WAL
+    /// Read a batch of WAL entries starting from `from`.
     ///
-    /// Returns `true` if this was the last batch and we're now done. `false` if more batches must
-    /// be sent.
+    /// Locks the WAL, reads up to `MAX_BATCH_BYTES` / `MAX_BATCH_OPS` entries, and returns them.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
+    async fn read_wal_batch(&self, from: u64) -> CollectionResult<WalBatch> {
+        let wal = self.wrapped_shard.wal.wal.lock().await;
+        let items_left = (wal.last_index() + 1).saturating_sub(from);
+        let items_total = (from - self.started_at) + items_left;
+
+        let mut batch = Vec::new();
+        let mut batch_bytes = 0usize;
+        for result in wal.read_with_size(from) {
+            let (idx, size, op) = result.map_err(|e| {
+                CollectionError::service_error(format!(
+                    "Failed to read WAL during queue proxy transfer: {e}"
+                ))
+            })?;
+
+            batch_bytes += size;
+            batch.push((idx, op));
+
+            // Always include at least one operation per batch
+            if batch_bytes > MAX_BATCH_BYTES || batch.len() >= MAX_BATCH_OPS {
+                break;
+            }
+        }
+
+        let reached_end = batch.len() as u64 >= items_left;
+        debug_assert!(
+            batch.len() as u64 <= items_left,
+            "batch cannot be larger than items_left",
+        );
+
+        Ok(WalBatch {
+            batch,
+            reached_end,
+            total: items_total,
+        })
+    }
+
+    /// Send a batch of WAL operations to the remote shard with retries.
+    ///
+    /// When `is_last` is true, waits for the remote to write to segment (stronger consistency).
+    /// Otherwise, only waits for WAL write on the remote.
     ///
     /// # Cancel safety
     ///
     /// This method is cancel safe.
     ///
     /// If cancelled - none, some or all operations may be transmitted to the remote.
-    ///
-    /// The internal field keeping track of the last transfer likely won't be updated. In the worst
-    /// case this might cause double sending operations. This should be fine as operations are
-    /// idempotent.
-    async fn transfer_wal_batch(&self) -> CollectionResult<bool> {
-        let mut update_lock = Some(self.update_lock.lock().await);
+    /// The `transfer_from` cursor may not be updated, causing idempotent re-sends on retry.
+    async fn send_wal_batch(&self, wal_batch: &WalBatch, is_last: bool) -> CollectionResult<()> {
         let transfer_from = self.transfer_from.load(Ordering::Relaxed);
-
-        // Lock WAL, count pending items to transfer, grab raw batch up to byte budget.
-        // We collect raw (not yet deserialized) bytes under the lock to minimize lock hold time,
-        // then deserialize outside the lock.
-        let (reached_end, total, batch) = {
-            let wal = self.wrapped_shard.wal.wal.lock().await;
-            let items_left = (wal.last_index() + 1).saturating_sub(transfer_from);
-            let items_total = (transfer_from - self.started_at) + items_left;
-
-            let mut batch = Vec::new();
-            let mut batch_bytes = 0usize;
-            for result in wal.read_with_size(transfer_from) {
-                let (idx, size, op) = result.map_err(|e| {
-                    CollectionError::service_error(format!(
-                        "Failed to read WAL during queue proxy transfer: {e}"
-                    ))
-                })?;
-
-                batch_bytes += size;
-                batch.push((idx, op));
-
-                // Always include at least one operation per batch
-                if batch_bytes > MAX_BATCH_BYTES || batch.len() >= MAX_BATCH_OPS {
-                    break;
-                }
-            }
-
-            let reached_end = batch.len() as u64 >= items_left;
-            debug_assert!(
-                batch.len() as u64 <= items_left,
-                "batch cannot be larger than items_left",
-            );
-            (reached_end, items_total, batch)
-        };
 
         log::trace!(
             "Queue proxy transferring batch of {} updates to peer {}",
-            batch.len(),
+            wal_batch.batch.len(),
             self.remote_shard.peer_id,
         );
-
-        // Normally, we immediately release the update lock to allow new updates.
-        // On the last batch we keep the lock to prevent accumulating more updates on the WAL,
-        // so we can finalize the transfer after this batch, before accepting new updates.
-        let last_batch = reached_end || batch.is_empty();
-        if !last_batch {
-            drop(update_lock.take());
-        }
 
         // If we are transferring the last batch, we need to wait for it to be written to a segment.
         //  - Why can we not wait? Assuming that order of operations is still enforced by the WAL,
@@ -624,7 +669,7 @@ impl Inner {
         //    updates are actually applied, we might create an inconsistency for read operations.
         //  - Why Segment and not Visible? We only need the data to be written, not necessarily
         //    visible through deferred indexing. Waiting for full visibility would be unnecessarily slow.
-        let wait = if last_batch {
+        let wait = if is_last {
             WaitUntil::Segment
         } else {
             WaitUntil::Wal
@@ -633,22 +678,30 @@ impl Inner {
         // Set initial progress on the first batch
         let is_first = transfer_from == self.started_at;
         if is_first {
-            self.progress.lock().set(0, total as usize);
+            self.progress.lock().set(0, wal_batch.total as usize);
         }
 
         // Transfer batch with retries and store last transferred ID
-        let last_idx = batch.last().map(|(idx, _)| *idx);
+        let last_idx = wal_batch.batch.last().map(|(idx, _)| *idx);
         for remaining_attempts in (0..BATCH_RETRIES).rev() {
             let disposed_hw = HwMeasurementAcc::disposable(); // Internal operation
-            match transfer_operations_batch(&batch, &self.remote_shard, wait, None, disposed_hw)
-                .await
+            match transfer_operations_batch(
+                &wal_batch.batch,
+                &self.remote_shard,
+                wait,
+                None,
+                disposed_hw,
+            )
+            .await
             {
                 Ok(()) => {
                     if let Some(idx) = last_idx {
                         self.transfer_from.store(idx + 1, Ordering::Relaxed);
 
                         let transferred = (idx + 1 - self.started_at) as usize;
-                        self.progress.lock().set(transferred, total as usize);
+                        self.progress
+                            .lock()
+                            .set(transferred, wal_batch.total as usize);
                     }
                     break;
                 }
@@ -662,7 +715,7 @@ impl Inner {
             }
         }
 
-        Ok(last_batch)
+        Ok(())
     }
 
     /// Set or release what WAL versions to keep preventing acknowledgment/truncation.
