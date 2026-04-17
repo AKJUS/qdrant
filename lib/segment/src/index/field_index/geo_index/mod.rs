@@ -2,10 +2,9 @@ use std::cmp::{max, min};
 use std::path::{Path, PathBuf};
 
 use common::counter::hardware_counter::HardwareCounterCell;
-use common::iterator_ext::{FallibleIteratorExt as _, TransposeResultIter as _};
 use common::types::PointOffsetType;
 use common::universal_io::MmapFile;
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use mutable_geo_index::InMemoryGeoMapIndex;
 use serde_json::Value;
 
@@ -231,30 +230,24 @@ impl GeoMapIndex {
     fn iterator(
         &self,
         values: Vec<GeoHash>,
-    ) -> Box<dyn Iterator<Item = OperationResult<PointOffsetType>> + '_> {
+    ) -> OperationResult<impl Iterator<Item = PointOffsetType> + '_> {
         match self {
-            GeoMapIndex::Mutable(index) => Box::new(
+            GeoMapIndex::Mutable(index) => Ok(Either::Left(Either::Right(
                 values
                     .into_iter()
                     .flat_map(|top_geo_hash| index.stored_sub_regions(top_geo_hash))
-                    .unique()
-                    .map(Ok),
-            ),
-            GeoMapIndex::Immutable(index) => Box::new(
+                    .unique(),
+            ))),
+            GeoMapIndex::Immutable(index) => Ok(Either::Left(Either::Left(
                 values
                     .into_iter()
                     .flat_map(|top_geo_hash| index.stored_sub_regions(top_geo_hash))
-                    .unique()
-                    .map(Ok),
-            ),
-            GeoMapIndex::Storage(index) => Box::new(
-                values
-                    .into_iter()
-                    .flat_map(|top_geo_hash| {
-                        index.stored_sub_regions(top_geo_hash).into_result_iter()
-                    })
-                    .unique_ok(),
-            ),
+                    .unique(),
+            ))),
+            GeoMapIndex::Storage(index) => {
+                let result = index.all_points(values)?;
+                Ok(Either::Right(result.into_iter()))
+            }
         }
     }
 
@@ -274,9 +267,7 @@ impl GeoMapIndex {
                 .points_per_hash()
                 .filter(filter_condition)
                 .collect_vec(),
-            GeoMapIndex::Storage(index) => index
-                .points_per_hash()?
-                .process_results(|iter| iter.filter(filter_condition).collect_vec())?,
+            GeoMapIndex::Storage(index) => index.points_per_hash(filter_condition)?,
         };
 
         // smallest regions first
@@ -534,47 +525,44 @@ impl PayloadFieldIndex for GeoMapIndex {
         &'a self,
         condition: &FieldCondition,
         hw_counter: &'a HardwareCounterCell,
-    ) -> Option<Box<dyn Iterator<Item = OperationResult<PointOffsetType>> + 'a>> {
+    ) -> OperationResult<Option<Box<dyn Iterator<Item = PointOffsetType> + 'a>>> {
         if let Some(geo_bounding_box) = &condition.geo_bounding_box {
-            let geo_hashes = rectangle_hashes(geo_bounding_box, GEO_QUERY_MAX_REGION).ok()?;
+            let geo_hashes = rectangle_hashes(geo_bounding_box, GEO_QUERY_MAX_REGION)?;
             let geo_condition_copy = *geo_bounding_box;
-            return Some(Box::new(self.iterator(geo_hashes).filter_map_ok(
-                move |point| {
+            return Ok(Some(Box::new(self.iterator(geo_hashes)?.filter(
+                move |&point| {
                     self.check_values_any(point, hw_counter, |geo_point| {
                         geo_condition_copy.check_point(geo_point)
                     })
-                    .then_some(point)
                 },
-            )));
+            ))));
         }
 
         if let Some(geo_radius) = &condition.geo_radius {
-            let geo_hashes = circle_hashes(geo_radius, GEO_QUERY_MAX_REGION).ok()?;
+            let geo_hashes = circle_hashes(geo_radius, GEO_QUERY_MAX_REGION)?;
             let geo_condition_copy = *geo_radius;
-            return Some(Box::new(self.iterator(geo_hashes).filter_map_ok(
-                move |point| {
+            return Ok(Some(Box::new(self.iterator(geo_hashes)?.filter(
+                move |&point| {
                     self.check_values_any(point, hw_counter, |geo_point| {
                         geo_condition_copy.check_point(geo_point)
                     })
-                    .then_some(point)
                 },
-            )));
+            ))));
         }
 
         if let Some(geo_polygon) = &condition.geo_polygon {
-            let geo_hashes = polygon_hashes(geo_polygon, GEO_QUERY_MAX_REGION).ok()?;
+            let geo_hashes = polygon_hashes(geo_polygon, GEO_QUERY_MAX_REGION)?;
             let geo_condition_copy = geo_polygon.convert();
-            return Some(Box::new(self.iterator(geo_hashes).filter_map_ok(
-                move |point| {
+            return Ok(Some(Box::new(self.iterator(geo_hashes)?.filter(
+                move |&point| {
                     self.check_values_any(point, hw_counter, |geo_point| {
                         geo_condition_copy.check_point(geo_point)
                     })
-                    .then_some(point)
                 },
-            )));
+            ))));
         }
 
-        None
+        Ok(None)
     }
 
     fn estimate_cardinality(
@@ -661,6 +649,7 @@ mod tests {
     use std::ops::Range;
 
     use common::counter::hardware_accumulator::HwMeasurementAcc;
+    use common::universal_io::MmapFile;
     use itertools::Itertools;
     use ordered_float::OrderedFloat;
     use rand::SeedableRng;
@@ -847,10 +836,7 @@ mod tests {
             index_type: IndexType,
         ) {
             let (field_index, _, _) = build_random_index(500, 20, index_type);
-            let exact_points_for_hashes = field_index
-                .iterator(hashes)
-                .map(|r| r.unwrap())
-                .collect_vec();
+            let exact_points_for_hashes = field_index.iterator(hashes).unwrap().collect_vec();
             let real_cardinality = exact_points_for_hashes.len();
 
             let hw_counter = HardwareCounterCell::new();
@@ -924,10 +910,7 @@ mod tests {
             index_type: IndexType,
         ) {
             let (field_index, _, _) = build_random_index(500, 20, index_type);
-            let exact_points_for_hashes = field_index
-                .iterator(hashes)
-                .map(|r| r.unwrap())
-                .collect_vec();
+            let exact_points_for_hashes = field_index.iterator(hashes).unwrap().collect_vec();
             let real_cardinality = exact_points_for_hashes.len();
 
             let hw_counter = HardwareCounterCell::new();
@@ -1002,7 +985,7 @@ mod tests {
             let mut indexed_matched_points = field_index
                 .filter(&field_condition, &hw_counter)
                 .unwrap()
-                .map(|r| r.unwrap())
+                .unwrap()
                 .collect_vec();
 
             matched_points.sort_unstable();
@@ -1065,7 +1048,7 @@ mod tests {
             let block_points = field_index
                 .filter(&block.condition, &hw_counter)
                 .unwrap()
-                .map(|r| r.unwrap())
+                .unwrap()
                 .collect_vec();
             assert_eq!(block_points.len(), block.cardinality);
         });
@@ -1273,7 +1256,7 @@ mod tests {
         let point_offsets = new_index
             .filter(&field_condition, &hw_counter)
             .unwrap()
-            .map(|r| r.unwrap())
+            .unwrap()
             .collect_vec();
         assert_eq!(point_offsets, vec![1]);
 
@@ -1285,7 +1268,7 @@ mod tests {
         let point_offsets = new_index
             .filter(&field_condition, &hw_counter)
             .unwrap()
-            .map(|r| r.unwrap())
+            .unwrap()
             .collect_vec();
         assert_eq!(point_offsets, vec![1]);
     }
@@ -1477,7 +1460,7 @@ mod tests {
         let point_offsets = new_index
             .filter(&field_condition, &hw_counter)
             .unwrap()
-            .map(|r| r.unwrap())
+            .unwrap()
             .collect_vec();
         // Only LOS_ANGELES is in the bounding box
         assert_eq!(point_offsets, vec![2]);
@@ -1536,7 +1519,7 @@ mod tests {
         let results = index
             .filter(&field_condition, &hw_counter)
             .unwrap()
-            .map(|r| r.unwrap())
+            .unwrap()
             .collect_vec();
         assert_eq!(results, vec![1]);
 
@@ -1592,7 +1575,7 @@ mod tests {
         let results = index
             .filter(&field_condition, &hw_counter)
             .unwrap()
-            .map(|r| r.unwrap())
+            .unwrap()
             .collect_vec();
         assert_eq!(results, vec![0]);
 
@@ -1678,11 +1661,11 @@ mod tests {
             assert_eq!(
                 indices[0]
                     .iterator(hashes.clone())
-                    .map(|r| r.unwrap())
+                    .unwrap()
                     .collect::<HashSet<_>>(),
                 index
                     .iterator(hashes.clone())
-                    .map(|r| r.unwrap())
+                    .unwrap()
                     .collect::<HashSet<_>>(),
             );
             for point_id in 0..POINT_COUNT {
@@ -1708,5 +1691,148 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Cross-check that [`StoredGeoMapIndex::all_points`] produces the same
+    /// point set as the mutable and immutable index implementations for a
+    /// variety of prefix configurations (single region, disjoint regions,
+    /// overlapping ancestor/descendant prefixes).
+    #[test]
+    fn test_all_points_congruence() {
+        const POINT_COUNT: usize = 500;
+
+        let (mut mutable_index, _mutable_tmp, _) =
+            build_random_index(POINT_COUNT, 20, IndexType::MutableGridstore);
+        let (mut immutable_index, _immutable_tmp, _) =
+            build_random_index(POINT_COUNT, 20, IndexType::RamMmap);
+        let (mut mmap_index, _mmap_tmp, _) = build_random_index(POINT_COUNT, 20, IndexType::Mmap);
+
+        let GeoMapIndex::Storage(storage_index) = &mmap_index else {
+            panic!("expected Mmap variant to build into Storage");
+        };
+
+        // Case 1: single contiguous region (Europe-ish polygon).
+        let europe_polygon = GeoPolygon {
+            exterior: GeoLineString {
+                points: vec![
+                    GeoPoint::new_unchecked(19.415558242000287, 69.18533258102943),
+                    GeoPoint::new_unchecked(2.4664944437317615, 61.852748225727254),
+                    GeoPoint::new_unchecked(2.713789718828849, 51.80793869181895),
+                    GeoPoint::new_unchecked(19.415558242000287, 69.18533258102943),
+                ],
+            },
+            interiors: None,
+        };
+        let europe_hashes = polygon_hashes(&europe_polygon, GEO_QUERY_MAX_REGION).unwrap();
+
+        // Case 2: two disjoint regions (NYC + Tokyo). Forces the prefix
+        // cursor inside `all_points` to traverse non-matching entries
+        // between the two prefix groups.
+        let nyc_circle = GeoRadius {
+            center: NYC,
+            radius: OrderedFloat(300_000.0),
+        };
+        let tokyo_circle = GeoRadius {
+            center: TOKYO,
+            radius: OrderedFloat(300_000.0),
+        };
+        let mut disjoint_hashes = circle_hashes(&nyc_circle, GEO_QUERY_MAX_REGION).unwrap();
+        disjoint_hashes.extend(circle_hashes(&tokyo_circle, GEO_QUERY_MAX_REGION).unwrap());
+
+        // Case 3: same set as Case 1 but with every prefix duplicated and
+        // with a shorter ancestor prefix added for the first hash. This
+        // exercises both the exact-duplicate `dedup()` and the
+        // ancestor-subsumption `dedup_by` paths in `all_points`.
+        let mut overlapping_hashes = europe_hashes.clone();
+        overlapping_hashes.extend(europe_hashes.iter().copied());
+        if let Some(first) = europe_hashes.first() {
+            let len = first.len();
+            if len > 2 {
+                overlapping_hashes.push(first.truncate(len - 1));
+                overlapping_hashes.push(first.truncate(len - 2));
+            }
+        }
+
+        // Case 4: a very large region (global-ish polygon) to stress the
+        // full-range traversal path where the cursor reaches the last
+        // prefix and keeps scanning deep into the points_map.
+        let global_polygon = GeoPolygon {
+            exterior: GeoLineString {
+                points: vec![
+                    GeoPoint::new_unchecked(-170.0, -80.0),
+                    GeoPoint::new_unchecked(170.0, -80.0),
+                    GeoPoint::new_unchecked(170.0, 80.0),
+                    GeoPoint::new_unchecked(-170.0, 80.0),
+                    GeoPoint::new_unchecked(-170.0, -80.0),
+                ],
+            },
+            interiors: None,
+        };
+        let global_hashes = polygon_hashes(&global_polygon, GEO_QUERY_MAX_REGION).unwrap();
+
+        let cases: Vec<(&str, Vec<GeoHash>)> = vec![
+            ("europe_single_region", europe_hashes),
+            ("nyc_plus_tokyo_disjoint", disjoint_hashes),
+            ("overlapping_and_duplicated", overlapping_hashes),
+            ("global_large_region", global_hashes),
+        ];
+
+        let assert_all_points_match =
+            |mutable_index: &GeoMapIndex,
+             immutable_index: &GeoMapIndex,
+             storage_index: &super::mmap_geo_index::StoredGeoMapIndex<MmapFile>,
+             cases: &[(&str, Vec<GeoHash>)],
+             phase: &str| {
+                for (name, hashes) in cases {
+                    let hashes = hashes.clone();
+                    let mutable_result: HashSet<PointOffsetType> =
+                        mutable_index.iterator(hashes.clone()).unwrap().collect();
+
+                    let immutable_result: HashSet<PointOffsetType> =
+                        immutable_index.iterator(hashes.clone()).unwrap().collect();
+
+                    let all_points_result: HashSet<PointOffsetType> = storage_index
+                        .all_points(hashes)
+                        .unwrap()
+                        .into_iter()
+                        .collect();
+
+                    assert_eq!(
+                        mutable_result, immutable_result,
+                        "{phase}: case `{name}`: mutable vs immutable differ",
+                    );
+                    assert_eq!(
+                        mutable_result, all_points_result,
+                        "{phase}: case `{name}`: mutable vs all_points differ",
+                    );
+                }
+            };
+
+        assert_all_points_match(
+            &mutable_index,
+            &immutable_index,
+            storage_index,
+            &cases,
+            "baseline",
+        );
+
+        const DELETED_POINT_IDS: &[PointOffsetType] = &[10, 11, 12, 100, 150];
+        for &id in DELETED_POINT_IDS {
+            mutable_index.remove_point(id).unwrap();
+            immutable_index.remove_point(id).unwrap();
+            mmap_index.remove_point(id).unwrap();
+        }
+
+        let GeoMapIndex::Storage(storage_index) = &mmap_index else {
+            panic!("expected Mmap variant to build into Storage");
+        };
+
+        assert_all_points_match(
+            &mutable_index,
+            &immutable_index,
+            storage_index,
+            &cases,
+            "after point deletions",
+        );
     }
 }
