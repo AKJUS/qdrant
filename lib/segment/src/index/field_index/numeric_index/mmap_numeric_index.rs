@@ -1,4 +1,4 @@
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 
@@ -6,11 +6,14 @@ use common::counter::conditioned_counter::ConditionedCounter;
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::counter::iterator_hw_measurement::HwMeasurementIteratorExt;
 use common::fs::{atomic_save_json, read_json};
-use common::mmap;
-use common::mmap::{AdviceSetting, MmapSlice, create_and_ensure_length};
+use common::generic_consts::Random;
+use common::mmap::{MmapSlice, create_and_ensure_length};
 use common::types::PointOffsetType;
-use common::universal_io::{MmapFile, OpenOptions, UniversalRead};
+use common::universal_io::{
+    MmapFile, OpenOptions, ReadRange, TypedStorage, UniversalRead, UniversalWrite,
+};
 use fs_err as fs;
+use itertools::Either;
 use memmap2::MmapMut;
 use serde::{Deserialize, Serialize};
 
@@ -39,11 +42,11 @@ pub struct MmapNumericIndex<T: Encodable + Numericable + Default + StoredValue +
 
 pub(super) struct Storage<
     T: Encodable + Numericable + Default + StoredValue + 'static,
-    S: UniversalRead<u8>,
+    S: UniversalWrite<u64> + UniversalRead<Point<T>> + UniversalRead<u8>,
 > {
-    deleted: BufferedUpdateBitSlice<MmapFile>,
+    deleted: BufferedUpdateBitSlice<S>,
     // sorted pairs (id + value), sorted by value (by id if values are equal)
-    pairs: MmapSlice<Point<T>>,
+    pairs: TypedStorage<S, Point<T>>,
     pub(super) point_to_values: StoredPointToValues<T, S>,
 }
 
@@ -52,46 +55,7 @@ struct MmapNumericIndexConfig {
     max_values_per_point: usize,
 }
 
-pub(super) struct NumericIndexPairsIterator<'a, T: Encodable + Numericable> {
-    pairs: &'a [Point<T>],
-    deleted: &'a BufferedUpdateBitSlice<MmapFile>,
-    start_index: usize,
-    end_index: usize,
-}
-
-impl<T: Encodable + Numericable> Iterator for NumericIndexPairsIterator<'_, T> {
-    type Item = Point<T>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.start_index < self.end_index {
-            let key = self.pairs[self.start_index];
-            let deleted = self.deleted.get(key.idx as usize).unwrap_or(true);
-            self.start_index += 1;
-            if deleted {
-                continue;
-            }
-            return Some(key);
-        }
-        None
-    }
-}
-
-impl<T: Encodable + Numericable> DoubleEndedIterator for NumericIndexPairsIterator<'_, T> {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        while self.start_index < self.end_index {
-            let key = self.pairs[self.end_index - 1];
-            let deleted = self.deleted.get(key.idx as usize).unwrap_or(true);
-            self.end_index -= 1;
-            if deleted {
-                continue;
-            }
-            return Some(key);
-        }
-        None
-    }
-}
-
-impl<T: Encodable + Numericable + Default + StoredValue> MmapNumericIndex<T> {
+impl<T: Encodable + Numericable + Default + StoredValue + bytemuck::Pod> MmapNumericIndex<T> {
     pub fn build(
         in_memory_index: InMemoryNumericIndex<T>,
         path: &Path,
@@ -175,19 +139,23 @@ impl<T: Encodable + Numericable + Default + StoredValue> MmapNumericIndex<T> {
         let deleted = MmapBitSlice::open(&deleted_path, OpenOptions::default())?;
         let deleted_count = deleted.count_ones()?;
         let do_populate = !is_on_disk;
-        let map = unsafe {
-            MmapSlice::try_from(mmap::open_write_mmap(
-                &pairs_path,
-                AdviceSetting::Global,
-                do_populate,
-            )?)?
+
+        let pairs_options = OpenOptions {
+            writeable: false,
+            need_sequential: false,
+            disk_parallel: None,
+            populate: Some(do_populate),
+            advice: None,
+            prevent_caching: None,
         };
+        let pairs = TypedStorage::open(pairs_path, pairs_options)?;
+
         let point_to_values = StoredPointToValues::open(path, do_populate)?;
 
         Ok(Some(Self {
             path: path.to_path_buf(),
             storage: Storage {
-                pairs: map,
+                pairs,
                 deleted: BufferedUpdateBitSlice::new(deleted),
                 point_to_values,
             },
@@ -274,8 +242,8 @@ impl<T: Encodable + Numericable + Default + StoredValue> MmapNumericIndex<T> {
 
     /// Returns the number of key-value pairs in the index.
     /// Note that is doesn't count deleted pairs.
-    pub(super) fn total_unique_values_count(&self) -> usize {
-        self.storage.pairs.len()
+    pub(super) fn total_unique_values_count(&self) -> OperationResult<usize> {
+        Ok(self.storage.pairs.len()? as usize)
     }
 
     pub(super) fn values_range<'a>(
@@ -283,23 +251,25 @@ impl<T: Encodable + Numericable + Default + StoredValue> MmapNumericIndex<T> {
         start_bound: Bound<Point<T>>,
         end_bound: Bound<Point<T>>,
         hw_counter: &'a HardwareCounterCell,
-    ) -> impl Iterator<Item = PointOffsetType> + 'a {
+    ) -> OperationResult<impl Iterator<Item = PointOffsetType> + 'a> {
         let hw_counter = self.make_conditioned_counter(hw_counter);
 
-        self.values_range_iterator(start_bound, end_bound)
-            .map(|Point { idx, .. }| idx)
+        Ok(self
+            .values_range_iterator(start_bound, end_bound)?
+            .map(|point| point.idx)
             .measure_hw_with_condition_cell(hw_counter, size_of::<Point<T>>(), |i| {
                 i.payload_index_io_read_counter()
-            })
+            }))
     }
 
     pub(super) fn orderable_values_range(
         &self,
         start_bound: Bound<Point<T>>,
         end_bound: Bound<Point<T>>,
-    ) -> impl DoubleEndedIterator<Item = (T, PointOffsetType)> + '_ {
-        self.values_range_iterator(start_bound, end_bound)
-            .map(|Point { val, idx, .. }| (val, idx))
+    ) -> OperationResult<impl DoubleEndedIterator<Item = (T, PointOffsetType)> + '_> {
+        Ok(self
+            .values_range_iterator(start_bound, end_bound)?
+            .map(|Point { val, idx, .. }| (val, idx)))
     }
 
     pub fn remove_point(&mut self, idx: PointOffsetType) {
@@ -326,58 +296,102 @@ impl<T: Encodable + Numericable + Default + StoredValue> MmapNumericIndex<T> {
         &self,
         start_bound: Bound<Point<T>>,
         end_bound: Bound<Point<T>>,
-    ) -> usize {
-        let iter = self.values_range_iterator(start_bound, end_bound);
-        iter.end_index - iter.start_index
+    ) -> OperationResult<usize> {
+        let (start, end) = self.values_range_bounds(start_bound, end_bound)?;
+        Ok(end - start)
     }
 
-    // get iterator
-    fn values_range_iterator(
+    /// Binary search within `[lo, hi)` range of `pairs` storage.
+    ///
+    /// Returns `Ok(index)` if the element is found, `Err(index)` if not
+    /// (where `index` is where the element would be inserted).
+    fn binary_search_pairs(
+        &self,
+        bound: &Point<T>,
+        lo: usize,
+        hi: usize,
+    ) -> OperationResult<Result<usize, usize>> {
+        let mut left = lo;
+        let mut right = hi;
+        while left < right {
+            let mid = left + (right - left) / 2;
+            // TODO(luis): use read_one
+            let elem = self.storage.pairs.read::<Random>(ReadRange {
+                byte_offset: (mid * size_of::<Point<T>>()) as u64,
+                length: 1,
+            })?;
+            match elem[0].cmp(bound) {
+                std::cmp::Ordering::Less => left = mid + 1,
+                std::cmp::Ordering::Equal => return Ok(Ok(mid)),
+                std::cmp::Ordering::Greater => right = mid,
+            }
+        }
+        Ok(Err(left))
+    }
+
+    /// Find the `[start_index, end_index)` range for the given bounds.
+    fn values_range_bounds(
         &self,
         start_bound: Bound<Point<T>>,
         end_bound: Bound<Point<T>>,
-    ) -> NumericIndexPairsIterator<'_, T> {
+    ) -> OperationResult<(usize, usize)> {
+        let len = self.storage.pairs.len()? as usize;
+
         let start_index = match start_bound {
             Bound::Included(bound) => self
-                .storage
-                .pairs
-                .binary_search(&bound)
+                .binary_search_pairs(&bound, 0, len)?
                 .unwrap_or_else(|idx| idx),
-            Bound::Excluded(bound) => match self.storage.pairs.binary_search(&bound) {
+            Bound::Excluded(bound) => match self.binary_search_pairs(&bound, 0, len)? {
                 Ok(idx) => idx + 1,
                 Err(idx) => idx,
             },
             Bound::Unbounded => 0,
         };
 
-        if start_index >= self.storage.pairs.len() {
-            return NumericIndexPairsIterator {
-                pairs: &self.storage.pairs,
-                deleted: &self.storage.deleted,
-                start_index: self.storage.pairs.len(),
-                end_index: self.storage.pairs.len(),
-            };
+        if start_index >= len {
+            return Ok((len, len));
         }
 
         let end_index = match end_bound {
-            Bound::Included(bound) => match self.storage.pairs[start_index..].binary_search(&bound)
-            {
-                Ok(idx) => idx + 1 + start_index,
-                Err(idx) => idx + start_index,
+            Bound::Included(bound) => match self.binary_search_pairs(&bound, start_index, len)? {
+                Ok(idx) => idx + 1,
+                Err(idx) => idx,
             },
-            Bound::Excluded(bound) => {
-                let end_bound = self.storage.pairs[start_index..].binary_search(&bound);
-                end_bound.unwrap_or_else(|idx| idx) + start_index
-            }
-            Bound::Unbounded => self.storage.pairs.len(),
+            Bound::Excluded(bound) => self
+                .binary_search_pairs(&bound, start_index, len)?
+                .unwrap_or_else(|idx| idx),
+            Bound::Unbounded => len,
         };
 
-        NumericIndexPairsIterator {
-            pairs: &self.storage.pairs,
-            deleted: &self.storage.deleted,
-            start_index,
-            end_index,
-        }
+        Ok((start_index, end_index))
+    }
+
+    /// Returns an iterator over non-deleted pairs.
+    ///
+    /// This will read the entire range upfront if it was not already cached.
+    fn values_range_iterator(
+        &self,
+        start_bound: Bound<Point<T>>,
+        end_bound: Bound<Point<T>>,
+    ) -> OperationResult<impl DoubleEndedIterator<Item = Point<T>> + '_> {
+        let (start_pos, end_pos) = self.values_range_bounds(start_bound, end_bound)?;
+        let count = end_pos - start_pos;
+
+        let iter = if count > 0 {
+            match self.storage.pairs.read::<Random>(ReadRange {
+                byte_offset: (start_pos * size_of::<Point<T>>()) as u64,
+                length: count as u64,
+            })? {
+                Cow::Borrowed(slice) => Either::Left(slice.iter().copied()),
+                Cow::Owned(vec) => Either::Right(vec.into_iter()),
+            }
+        } else {
+            Either::Right(Vec::new().into_iter())
+        };
+
+        let deleted = &self.storage.deleted;
+
+        Ok(iter.filter(move |point| !deleted.get(point.idx as usize).unwrap_or(true)))
     }
 
     fn make_conditioned_counter<'a>(
@@ -414,7 +428,7 @@ impl<T: Encodable + Numericable + Default + StoredValue> MmapNumericIndex<T> {
             pairs,
             point_to_values,
         } = storage;
-        pairs.clear_cache()?;
+        pairs.clear_ram_cache()?;
         deleted.clear_cache()?;
         point_to_values.clear_cache()?;
         Ok(())
