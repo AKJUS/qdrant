@@ -111,7 +111,7 @@ impl<
         )
     }
 
-    fn score_stored_batch(&self, ids: &[PointOffsetType], scores: &mut [ScoreType]) {
+    fn score_stored_batch_impl(&self, ids: &[PointOffsetType], scores: &mut [ScoreType]) {
         debug_assert!(ids.len() <= VECTOR_READ_BATCH_SIZE);
         debug_assert_eq!(ids.len(), scores.len());
 

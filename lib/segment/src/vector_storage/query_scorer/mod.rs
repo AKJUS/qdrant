@@ -21,10 +21,22 @@ pub trait QueryScorer {
 
     fn score_stored(&self, idx: PointOffsetType) -> ScoreType;
 
+    #[inline]
+    fn score_stored_batch(&self, ids: &[PointOffsetType], scores: &mut [ScoreType]) {
+        assert_eq!(ids.len(), scores.len());
+
+        let batched_ids = ids.chunks(VECTOR_READ_BATCH_SIZE);
+        let batched_scores = scores.chunks_mut(VECTOR_READ_BATCH_SIZE);
+
+        for (ids, scores) in batched_ids.zip(batched_scores) {
+            self.score_stored_batch_impl(ids, scores);
+        }
+    }
+
     /// Score a batch of points
     ///
     /// Enable underlying storage to optimize pre-fetching of data
-    fn score_stored_batch(&self, ids: &[PointOffsetType], scores: &mut [ScoreType]) {
+    fn score_stored_batch_impl(&self, ids: &[PointOffsetType], scores: &mut [ScoreType]) {
         debug_assert!(ids.len() <= VECTOR_READ_BATCH_SIZE);
         debug_assert_eq!(ids.len(), scores.len());
 

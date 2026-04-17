@@ -256,15 +256,16 @@ where
         mut callback: impl FnMut(PointOffsetType, CowVector<'_>),
     ) {
         let point_offsets: Vec<_> = keys.into_iter().collect();
-        // Create a result vec of the appropriate size
+
         self.vectors
             .as_ref()
             .unwrap()
-            .read_vectors_async::<P>(&point_offsets, |_pos, key, vector| {
-                let cow_vector = CowVector::from(T::slice_to_float_cow(Cow::Borrowed(vector)));
-                callback(key, cow_vector);
-            })
-            .unwrap();
+            .for_each_in_batch(&point_offsets, |idx, vector| {
+                let point_offset = point_offsets[idx];
+                let vector = CowVector::from(T::slice_to_float_cow(Cow::Borrowed(vector)));
+
+                callback(point_offset, vector);
+            });
     }
 
     fn get_vector_opt<P: AccessPattern>(&self, key: PointOffsetType) -> Option<CowVector<'_>> {

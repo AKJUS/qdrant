@@ -270,6 +270,31 @@ impl<T: Sized + Copy + 'static, S: UniversalWrite<T>> ChunkedVectors<T, S> {
         Ok(new_id)
     }
 
+    #[inline]
+    fn read_range(&self, offset: VectorOffsetType, count: usize) -> Option<(usize, ReadRange)> {
+        if offset.checked_add(count)? > self.status.len {
+            return None;
+        }
+
+        let chunk_idx = self.get_chunk_index(offset);
+        if chunk_idx >= self.chunks.len() {
+            return None;
+        }
+
+        let element_offset = self.get_chunk_offset(offset);
+        let elements_length = count * self.config.dim;
+        if element_offset + elements_length > self.config.chunk_size_vectors * self.config.dim {
+            return None;
+        }
+
+        let range = ReadRange {
+            byte_offset: (element_offset * size_of::<T>()) as u64,
+            length: elements_length as u64,
+        };
+
+        Some((chunk_idx, range))
+    }
+
     /// Returns `count` flattened vectors starting from `starting_key`.
     ///
     /// Returns `None` when:
@@ -282,31 +307,12 @@ impl<T: Sized + Copy + 'static, S: UniversalWrite<T>> ChunkedVectors<T, S> {
         count: usize,
         force_sequential: bool,
     ) -> Option<Cow<'_, [T]>> {
-        if start_key.checked_add(count)? > self.status.len {
-            return None;
-        }
+        let (chunk_idx, range) = self.read_range(start_key, count)?;
 
-        let chunk_idx = self.get_chunk_index(start_key);
-        if chunk_idx >= self.chunks.len() {
-            return None;
-        }
-
-        let elements_length = count * self.config.dim;
-        let element_offset = self.get_chunk_offset(start_key);
-        let element_end = element_offset + elements_length;
         let chunk = &self.chunks[chunk_idx];
 
-        if element_end > self.config.chunk_size_vectors * self.config.dim {
-            return None;
-        }
-
-        let range = ReadRange {
-            byte_offset: (element_offset * size_of::<T>()) as u64,
-            length: elements_length as u64,
-        };
-
         let use_sequential =
-            force_sequential || elements_length * size_of::<T>() > PAGE_SIZE_BYTES * 4;
+            force_sequential || range.length as usize * size_of::<T>() > PAGE_SIZE_BYTES * 4;
 
         if use_sequential {
             chunk.read::<Sequential>(range).ok()
@@ -316,25 +322,55 @@ impl<T: Sized + Copy + 'static, S: UniversalWrite<T>> ChunkedVectors<T, S> {
     }
 
     pub fn for_each_in_batch<F: FnMut(usize, &[T]), O: VectorOffset>(&self, keys: &[O], mut f: F) {
-        debug_assert!(keys.len() <= VECTOR_READ_BATCH_SIZE);
-        let do_sequential_read = is_read_with_prefetch_efficient(keys);
-
-        // The `f` is most likely a scorer function.
-        // Fetching all vectors first then scoring them is more cache friendly
-        // then fetching and scoring in a single loop.
-        let mut vectors_buffer = [const { MaybeUninit::uninit() }; VECTOR_READ_BATCH_SIZE];
-        let vectors = maybe_uninit_fill_from(
-            &mut vectors_buffer,
-            keys.iter().map(|&key| {
-                self.get_many_impl(key.offset(), 1, do_sequential_read)
-                    .unwrap_or_else(|| panic!("Vector {key} not found"))
-            }),
-        )
-        .0;
-
-        for (i, vec) in vectors.iter().enumerate() {
-            f(i, vec.as_ref());
+        #[cfg(target_os = "linux")]
+        if S::kind() == common::universal_io::UniversalKind::IoUring {
+            return self.for_each_in_batch_async(keys, f);
         }
+
+        // The `f` is most likely a scorer function. Fetching all vectors first, and then scoring
+        // them is more cache friendly, than fetching and scoring in a single loop.
+
+        let mut vectors_buffer = [const { MaybeUninit::uninit() }; VECTOR_READ_BATCH_SIZE];
+
+        for (batch_idx, keys) in keys.chunks(VECTOR_READ_BATCH_SIZE).enumerate() {
+            let force_sequential = is_read_with_prefetch_efficient(keys);
+
+            let (vectors, _) = maybe_uninit_fill_from(
+                &mut vectors_buffer,
+                keys.iter().map(|&key| {
+                    self.get_many_impl(key.offset(), 1, force_sequential)
+                        .unwrap_or_else(|| panic!("Vector {key} not found"))
+                }),
+            );
+
+            let batch_offset = VECTOR_READ_BATCH_SIZE * batch_idx;
+
+            for (vector_idx, vec) in vectors.iter().enumerate() {
+                f(batch_offset + vector_idx, vec.as_ref());
+            }
+        }
+    }
+
+    #[allow(dead_code)] // only used on Linux
+    fn for_each_in_batch_async<O, F>(&self, keys: &[O], mut callback: F)
+    where
+        O: VectorOffset,
+        F: FnMut(usize, &[T]),
+    {
+        let reads = keys.iter().enumerate().map(|(idx, offset)| {
+            let (chunk_idx, range) = self.read_range(offset.offset(), 1).expect("vector exists");
+            let chunk = &self.chunks[chunk_idx];
+
+            (idx, chunk, range)
+        });
+
+        let callback = move |idx, vector: &[T]| {
+            callback(idx, vector);
+            Ok(())
+        };
+
+        // access pattern does not matter for io_uring
+        UniversalRead::read_multi::<Random, _>(reads, callback).expect("vector read");
     }
 
     pub fn flusher(&self) -> Flusher {

@@ -66,7 +66,7 @@ impl QueryScorer for SparseMetricQueryScorer<'_> {
         self.score_ref(v2)
     }
 
-    fn score_stored_batch(&self, ids: &[PointOffsetType], scores: &mut [ScoreType]) {
+    fn score_stored_batch_impl(&self, ids: &[PointOffsetType], scores: &mut [ScoreType]) {
         debug_assert_eq!(ids.len(), scores.len());
 
         for idx in 0..ids.len() {

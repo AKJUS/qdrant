@@ -1,5 +1,3 @@
-#[cfg(target_os = "linux")]
-pub mod async_raw_scorer;
 mod chunked_vectors;
 pub mod common;
 pub mod dense;

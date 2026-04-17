@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use bytemuck::TransparentWrapper;
 
 use super::super::{
-    ByteOffset, FileIndex, Flusher, OpenOptions, ReadRange, Result, UniversalRead,
+    ByteOffset, FileIndex, Flusher, OpenOptions, ReadRange, Result, UniversalKind, UniversalRead,
     UniversalReadFileOps, UniversalWrite,
 };
 use crate::generic_consts::AccessPattern;
@@ -115,6 +115,10 @@ impl<S: UniversalRead<T>, T: Copy + 'static> UniversalRead<T> for TypedStorage<S
             .into_iter()
             .map(|(meta, file, range)| (meta, &file.inner, range));
         S::read_multi_iter::<P, _>(reads)
+    }
+
+    fn kind() -> UniversalKind {
+        S::kind()
     }
 }
 

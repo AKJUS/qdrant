@@ -18,6 +18,8 @@ mod tests;
 pub use cached_slice::CachedSlice;
 use controller::{CacheController, CacheRead};
 
+use super::UniversalKind;
+
 /// We cache data in blocks of this size.
 /// Should be multiple of filesystem block size (usually 4 KiB).
 const BLOCK_SIZE: usize = 16 * 1024;
@@ -120,5 +122,9 @@ impl<T: bytemuck::Pod> UniversalRead<T> for CachedSlice<T> {
     fn clear_ram_cache(&self) -> Result<()> {
         // TODO: issue fadvise DONTNEED on the cache file's backing mmap region.
         Ok(())
+    }
+
+    fn kind() -> UniversalKind {
+        UniversalKind::DiskCache
     }
 }

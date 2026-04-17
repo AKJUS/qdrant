@@ -1,7 +1,9 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
-use super::super::{OpenOptions, ReadRange, Result, UniversalRead, UniversalReadFileOps};
+use super::super::{
+    OpenOptions, ReadRange, Result, UniversalKind, UniversalRead, UniversalReadFileOps,
+};
 use crate::generic_consts::AccessPattern;
 
 #[derive(Debug)]
@@ -101,5 +103,9 @@ where
             .into_iter()
             .map(|(meta, file, range)| (meta, &file.0, range));
         S::read_multi_iter::<P, _>(it)
+    }
+
+    fn kind() -> UniversalKind {
+        S::kind()
     }
 }

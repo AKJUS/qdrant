@@ -24,6 +24,13 @@ pub use self::wrappers::*;
 pub use self::write::UniversalWrite;
 use crate::mmap::{Advice, AdviceSetting};
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum UniversalKind {
+    Mmap,
+    IoUring,
+    DiskCache,
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct OpenOptions {
     pub writeable: bool,

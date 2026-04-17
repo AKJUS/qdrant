@@ -171,6 +171,10 @@ impl<T: bytemuck::Pod + 'static> UniversalRead<T> for IoUringFile {
         crate::fs::clear_disk_cache(self.file.path())?;
         Ok(())
     }
+
+    fn kind() -> UniversalKind {
+        UniversalKind::IoUring
+    }
 }
 
 impl<T: bytemuck::Pod + 'static> UniversalWrite<T> for IoUringFile {

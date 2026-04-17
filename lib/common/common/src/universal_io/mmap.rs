@@ -109,6 +109,10 @@ where
         mmap.clear_cache();
         Ok(())
     }
+
+    fn kind() -> UniversalKind {
+        UniversalKind::Mmap
+    }
 }
 
 impl<T> UniversalWrite<T> for MmapFile

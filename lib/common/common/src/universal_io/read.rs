@@ -85,5 +85,7 @@ pub trait UniversalRead<T: Copy + 'static>: UniversalReadFileOps {
         }))
     }
 
+    fn kind() -> UniversalKind;
+
     // When adding provided methods, don't forget to update impls in crate::universal_io::wrappers::*.
 }
