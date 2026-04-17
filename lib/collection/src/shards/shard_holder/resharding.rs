@@ -93,9 +93,16 @@ impl ShardHolder {
         match resharding_key.direction {
             ReshardingDirection::Up => {
                 if has_shard {
-                    return Err(CollectionError::bad_request(format!(
-                        "shard holder already contains shard {shard_id} replica set",
-                    )));
+                    // Allow re-application: the shard may exist as a leftover from a
+                    // previous incomplete start attempt (e.g. crash after key_mapping
+                    // was persisted but before resharding_state was written).
+                    // create_shard_dir will clean up the stale directory and add_shard
+                    // will evict the old entry.
+                    log::warn!(
+                        "Shard {shard_id} already exists during resharding start, \
+                         likely a leftover from a previous incomplete attempt, \
+                         it will be recreated"
+                    );
                 }
             }
             ReshardingDirection::Down => {
@@ -165,6 +172,28 @@ impl ShardHolder {
     }
 
     pub fn commit_read_hashring(&mut self, resharding_key: &ReshardKey) -> CollectionResult<()> {
+        // Idempotent: if no resharding is active, or the stage is already at/past
+        // ReadHashRingCommitted, this entry was already applied. Return Ok to
+        // prevent silent state divergence via apply_entries error swallowing.
+        match self.resharding_state.read().deref() {
+            None => {
+                log::warn!(
+                    "commit_read_hashring: no resharding in progress for {resharding_key}, treating as already committed",
+                );
+                return Ok(());
+            }
+            Some(state)
+                if state.matches(resharding_key)
+                    && state.stage >= ReshardingStage::ReadHashRingCommitted =>
+            {
+                log::warn!(
+                    "commit_read_hashring: read hashring already committed for {resharding_key}, skipping",
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
+
         self.check_resharding(
             resharding_key,
             check_stage(ReshardingStage::MigratingPoints),
@@ -182,6 +211,27 @@ impl ShardHolder {
     }
 
     pub fn commit_write_hashring(&mut self, resharding_key: &ReshardKey) -> CollectionResult<()> {
+        // Idempotent: if no resharding is active, or the stage is already at/past
+        // WriteHashRingCommitted, this entry was already applied.
+        match self.resharding_state.read().deref() {
+            None => {
+                log::warn!(
+                    "commit_write_hashring: no resharding in progress for {resharding_key}, treating as already committed",
+                );
+                return Ok(());
+            }
+            Some(state)
+                if state.matches(resharding_key)
+                    && state.stage >= ReshardingStage::WriteHashRingCommitted =>
+            {
+                log::warn!(
+                    "commit_write_hashring: write hashring already committed for {resharding_key}, skipping",
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
+
         self.check_resharding(
             resharding_key,
             check_stage(ReshardingStage::ReadHashRingCommitted),
@@ -202,6 +252,14 @@ impl ShardHolder {
     }
 
     pub fn check_finish_resharding(&mut self, resharding_key: &ReshardKey) -> CollectionResult<()> {
+        // Idempotent: if no resharding is active, finish was already applied.
+        if self.resharding_state.read().is_none() {
+            log::warn!(
+                "check_finish_resharding: no resharding in progress for {resharding_key}, treating as already finished",
+            );
+            return Ok(());
+        }
+
         self.check_resharding(
             resharding_key,
             check_stage(ReshardingStage::WriteHashRingCommitted),
@@ -266,28 +324,31 @@ impl ShardHolder {
     pub fn check_abort_resharding(&self, resharding_key: &ReshardKey) -> CollectionResult<()> {
         let state = self.resharding_state.read();
 
-        // - do not abort if no resharding operation is ongoing
         let Some(state) = state.deref() else {
-            return Err(CollectionError::bad_request(format!(
-                "can't abort resharding {resharding_key}, no resharding operation in progress",
-            )));
+            // Idempotent: no resharding in progress means the abort (or finish)
+            // was already applied, or the start was never applied on this node.
+            // Returning an error here would be silently swallowed by apply_entries,
+            // causing permanent state divergence between peers.
+            log::warn!(
+                "check_abort_resharding: no resharding in progress for {resharding_key}, treating as already aborted",
+            );
+            return Ok(());
         };
 
-        // - do not abort if there is no active resharding operation with that key
         if !state.matches(resharding_key) {
-            return Err(CollectionError::bad_request(format!(
-                "can't abort resharding {resharding_key}, \
-                 resharding operation in progress has key {}",
+            // Idempotent: a different resharding is active, so the one we're
+            // trying to abort was already handled. Same reasoning as above.
+            log::warn!(
+                "check_abort_resharding: resharding {resharding_key} not found, current resharding has key {}, treating as already aborted",
                 state.key(),
-            )));
+            );
+            return Ok(());
         }
 
-        // - it's safe to run, if read hash ring was not committed yet
         if state.stage < ReshardingStage::ReadHashRingCommitted {
             return Ok(());
         }
 
-        // - but resharding can't be aborted, after read hash ring has been committed
         Err(CollectionError::bad_request(format!(
             "can't abort resharding {resharding_key}, \
              because read hash ring has been committed already, \
@@ -697,5 +758,199 @@ fn shard_key_fmt(key: &Option<ShardKey>) -> &dyn fmt::Display {
     match key {
         Some(key) => key,
         None => &"default",
+    }
+}
+
+/// Resharding consensus operations must be idempotent.
+///
+/// The consensus apply loop (`apply_entries` in `consensus_manager.rs`) silently
+/// swallows all non-`ServiceError` results and marks the entry as applied. Since
+/// resharding check functions return `bad_request` (`StorageError::BadRequest`,
+/// not `ServiceError`), any validation failure is silently swallowed.
+///
+/// If local state on a peer diverges for any reason (crash during partial apply,
+/// prior swallowed error), the same committed Raft entry produces different
+/// outcomes on different peers — succeeding on some, silently swallowed on
+/// others — causing permanent resharding state divergence despite identical
+/// consensus term and commit.
+///
+/// These tests verify that resharding operations return `Ok` when the desired
+/// post-condition is already met or the operation is inapplicable, rather than
+/// returning `bad_request` errors that get silently swallowed.
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::*;
+
+    fn make_reshard_key(shard_id: ShardId) -> ReshardKey {
+        ReshardKey {
+            uuid: Uuid::new_v4(),
+            direction: ReshardingDirection::Up,
+            peer_id: 1,
+            shard_id,
+            shard_key: None,
+        }
+    }
+
+    fn make_holder() -> (tempfile::TempDir, ShardHolder) {
+        let dir = tempfile::tempdir().unwrap();
+        let holder = ShardHolder::new(dir.path(), ShardingMethod::Auto).unwrap();
+        (dir, holder)
+    }
+
+    // ------------------------------------------------------------------
+    // check_abort_resharding idempotency
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_abort_check_idempotent_when_no_resharding_active() {
+        let (_dir, holder) = make_holder();
+        let key = make_reshard_key(1);
+
+        // No resharding is in progress. This happens when:
+        // - The abort was already applied on this node (crash recovery replay)
+        // - The start was never applied on this node (prior swallowed error)
+        //
+        // Returning bad_request here causes silent state divergence: the error
+        // is swallowed by apply_entries, the entry is marked as applied, but
+        // resharding state is not cleared on this peer while it IS cleared on
+        // peers where the operation succeeded.
+        let result = holder.check_abort_resharding(&key);
+        assert!(
+            result.is_ok(),
+            "check_abort_resharding must return Ok when no resharding is active \
+             (idempotent: already aborted or never started), got error: {result:?}",
+        );
+    }
+
+    #[test]
+    fn test_abort_check_idempotent_when_different_resharding_active() {
+        let (_dir, holder) = make_holder();
+
+        // Set up resharding state for shard 1
+        let active_key = make_reshard_key(1);
+        holder
+            .resharding_state
+            .write(|state| {
+                *state = Some(ReshardState::new(
+                    active_key.uuid,
+                    active_key.direction,
+                    active_key.peer_id,
+                    active_key.shard_id,
+                    active_key.shard_key.clone(),
+                ));
+            })
+            .unwrap();
+
+        // Try to abort a DIFFERENT resharding (shard 2). This can happen when
+        // the original resharding was already aborted and a new one was started.
+        let other_key = make_reshard_key(2);
+        let result = holder.check_abort_resharding(&other_key);
+        assert!(
+            result.is_ok(),
+            "check_abort_resharding must return Ok when a different resharding is active \
+             (the one we're aborting was already handled), got error: {result:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // commit_read_hashring idempotency
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_commit_read_idempotent_when_no_resharding_active() {
+        let (_dir, mut holder) = make_holder();
+        let key = make_reshard_key(1);
+
+        // No resharding is in progress. commit_read should be a no-op, not an
+        // error that gets silently swallowed causing state divergence.
+        let result = holder.commit_read_hashring(&key);
+        assert!(
+            result.is_ok(),
+            "commit_read_hashring must return Ok when no resharding is active, got error: {result:?}",
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // commit_write_hashring idempotency
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_commit_write_idempotent_when_no_resharding_active() {
+        let (_dir, mut holder) = make_holder();
+        let key = make_reshard_key(1);
+
+        let result = holder.commit_write_hashring(&key);
+        assert!(
+            result.is_ok(),
+            "commit_write_hashring must return Ok when no resharding is active, got error: {result:?}",
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // check_finish_resharding idempotency
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_finish_check_idempotent_when_no_resharding_active() {
+        let (_dir, mut holder) = make_holder();
+        let key = make_reshard_key(1);
+
+        let result = holder.check_finish_resharding(&key);
+        assert!(
+            result.is_ok(),
+            "check_finish_resharding must return Ok when no resharding is active (idempotent: already finished), got error: {result:?}",
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Divergence scenario: proves the bug end-to-end
+    // ------------------------------------------------------------------
+
+    /// Simulates two peers processing the same sequence of committed Raft
+    /// entries, where peer B missed the initial "start" due to a silently
+    /// swallowed error. Every subsequent operation must succeed on BOTH peers
+    /// to prevent permanent resharding state divergence.
+    #[test]
+    fn test_resharding_ops_do_not_cause_divergence_between_peers() {
+        let (_dir_a, holder_a) = make_holder();
+        let (_dir_b, holder_b) = make_holder();
+        let key = make_reshard_key(1);
+
+        // Simulate: "start resharding" was applied on peer A but silently
+        // swallowed on peer B (e.g. due to shard already existing from a
+        // crashed previous attempt).
+        holder_a
+            .resharding_state
+            .write(|state| {
+                *state = Some(ReshardState::new(
+                    key.uuid,
+                    key.direction,
+                    key.peer_id,
+                    key.shard_id,
+                    key.shard_key.clone(),
+                ));
+            })
+            .unwrap();
+        // peer B has no resharding state (start was swallowed)
+
+        // Now an "abort resharding" consensus entry is committed.
+        // Both peers must return Ok. If peer B returns bad_request, the error
+        // is silently swallowed, state is not modified, and peer A clears its
+        // resharding state while peer B remains without it — but a future
+        // resharding start would diverge because peer A is clean while peer B
+        // might have leftover state from other operations.
+        let result_a = holder_a.check_abort_resharding(&key);
+        let result_b = holder_b.check_abort_resharding(&key);
+
+        assert!(
+            result_a.is_ok(),
+            "Peer A (has resharding state) must succeed: {result_a:?}"
+        );
+        assert!(
+            result_b.is_ok(),
+            "Peer B (no resharding state) must also succeed to prevent divergence: {result_b:?}"
+        );
     }
 }
