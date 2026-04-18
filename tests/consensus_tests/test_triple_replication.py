@@ -88,6 +88,13 @@ def test_triple_replication(tmp_path: pathlib.Path):
                     count = get_collection_point_count(peer_api_uri, COLLECTION_NAME, exact=True)
                     print(count)
 
+                # Make sure there are no stale updates
+                upsert_random_points(peer_api_uris[0], 1, COLLECTION_NAME, offset=100_000, wait=True)
+
+                for peer_api_uri in peer_api_uris:
+                    count = get_collection_point_count(peer_api_uri, COLLECTION_NAME, exact=True)
+                    print(count)
+
                 assert False, f"Points count is not equal on all peers: {points_counts}"
             break
 
