@@ -42,12 +42,19 @@ pub enum GeoMapIndex {
 
 impl GeoMapIndex {
     pub fn new_mmap(path: &Path, is_on_disk: bool) -> OperationResult<Option<Self>> {
-        let Some(mmap_index) = StoredGeoMapIndex::open(path, is_on_disk)? else {
+        // Low-memory mode downgrades the in-RAM `Immutable` wrapper to the
+        // pure-mmap `Storage` variant at load time. Files are shared between
+        // variants; the persisted `is_on_disk` flag in `mmap_index` is
+        // untouched.
+        let effective_is_on_disk =
+            is_on_disk || common::low_memory::low_memory_mode().prefer_disk();
+
+        let Some(mmap_index) = StoredGeoMapIndex::open(path, effective_is_on_disk)? else {
             // Files don't exist, cannot load
             return Ok(None);
         };
 
-        let index = if is_on_disk {
+        let index = if effective_is_on_disk {
             GeoMapIndex::Storage(Box::new(mmap_index))
         } else {
             GeoMapIndex::Immutable(ImmutableGeoMapIndex::open_mmap(mmap_index)?)

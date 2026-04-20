@@ -121,12 +121,19 @@ where
 {
     /// Load immutable mmap based index, either in RAM or on disk
     pub fn new_mmap(path: &Path, is_on_disk: bool) -> OperationResult<Option<Self>> {
-        let Some(mmap_index) = MmapMapIndex::open(path, is_on_disk)? else {
+        // Low-memory mode downgrades the in-RAM `Immutable` wrapper to the
+        // pure-mmap `Storage` variant at load time. Files are shared between
+        // variants; the persisted `is_on_disk` flag in `mmap_index` is
+        // untouched.
+        let effective_is_on_disk =
+            is_on_disk || common::low_memory::low_memory_mode().prefer_disk();
+
+        let Some(mmap_index) = MmapMapIndex::open(path, effective_is_on_disk)? else {
             // Files don't exist, cannot load
             return Ok(None);
         };
 
-        let index = if is_on_disk {
+        let index = if effective_is_on_disk {
             // Use on mmap directly
             MapIndex::Mmap(Box::new(mmap_index))
         } else {
