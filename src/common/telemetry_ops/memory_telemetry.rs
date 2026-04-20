@@ -59,3 +59,18 @@ impl MemoryTelemetry {
         None
     }
 }
+
+/// Reader for [`common::memory_usage`] — returns current jemalloc resident bytes.
+#[cfg(all(
+    not(target_env = "msvc"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub fn resident_bytes() -> Option<usize> {
+    epoch::advance().ok()?;
+    stats::resident::read().ok()
+}
+
+#[cfg(target_env = "msvc")]
+pub fn resident_bytes() -> Option<usize> {
+    None
+}

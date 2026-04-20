@@ -143,6 +143,7 @@ pub fn strict_mode_from_api(value: grpc::StrictModeConfig) -> StrictModeConfig {
         multivector_config,
         sparse_config,
         max_payload_index_count,
+        max_resident_memory_percent,
     } = value;
     StrictModeConfig {
         enabled,
@@ -165,6 +166,7 @@ pub fn strict_mode_from_api(value: grpc::StrictModeConfig) -> StrictModeConfig {
         multivector_config: multivector_config.map(StrictModeMultivectorConfig::from),
         sparse_config: sparse_config.map(StrictModeSparseConfig::from),
         max_payload_index_count: max_payload_index_count.map(|i| i as usize),
+        max_resident_memory_percent: max_resident_memory_percent.map(|i| i as u8),
     }
 }
 

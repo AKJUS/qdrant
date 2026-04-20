@@ -24,6 +24,7 @@ pub mod load_concurrency;
 pub mod low_memory;
 pub mod math;
 pub mod maybe_uninit;
+pub mod memory_usage;
 pub mod mmap;
 pub mod mmap_hashmap;
 pub mod num_traits;

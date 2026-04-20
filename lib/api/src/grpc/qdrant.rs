@@ -1110,6 +1110,11 @@ pub struct StrictModeConfig {
     /// Max number of payload indexes in a collection
     #[prost(uint64, optional, tag = "19")]
     pub max_payload_index_count: ::core::option::Option<u64>,
+    /// Reject memory-consuming update operations when process resident memory exceeds this percentage of total RAM (cgroup-aware, 1-100).
+    /// Delete-style operations are still allowed so memory can be freed.
+    #[prost(uint32, optional, tag = "21")]
+    #[validate(range(min = 1, max = 100))]
+    pub max_resident_memory_percent: ::core::option::Option<u32>,
 }
 #[derive(validator::Validate)]
 #[derive(serde::Serialize)]

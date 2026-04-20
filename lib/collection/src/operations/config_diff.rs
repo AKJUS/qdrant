@@ -342,6 +342,7 @@ impl DiffConfig<StrictModeConfig> for StrictModeConfig {
             sparse_config,
             max_payload_index_count,
             search_max_batchsize,
+            max_resident_memory_percent,
         } = diff;
 
         StrictModeConfig {
@@ -375,6 +376,8 @@ impl DiffConfig<StrictModeConfig> for StrictModeConfig {
                 .or(self.sparse_config.as_ref())
                 .cloned(),
             max_payload_index_count: max_payload_index_count.or(self.max_payload_index_count),
+            max_resident_memory_percent: max_resident_memory_percent
+                .or(self.max_resident_memory_percent),
         }
     }
 }

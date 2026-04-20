@@ -21,6 +21,7 @@ use ::common::cpu::get_cpu_budget;
 use ::common::flags::{feature_flags, init_feature_flags};
 use ::common::fs::{FsCheckResult, check_fs_info, check_mmap_functionality};
 use ::common::low_memory::init_low_memory_mode;
+use ::common::memory_usage::set_resident_bytes_reader;
 use ::common::mmap::MULTI_MMAP_SUPPORT_CHECK_RESULT;
 use ::common::mmap::advice::set_global;
 use ::tonic::transport::Uri;
@@ -182,6 +183,10 @@ fn main() -> anyhow::Result<()> {
     setup_panic_hook(reporting_enabled, reporting_id.to_string());
 
     set_global(settings.storage.mmap_advice);
+
+    // Global tracker of used RAM bytes, have built-in TTL cache
+    set_resident_bytes_reader(crate::common::telemetry_ops::memory_telemetry::resident_bytes);
+
     segment::vector_storage::common::set_async_scorer(
         settings
             .storage

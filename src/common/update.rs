@@ -124,6 +124,19 @@ impl Validate for UpdateOperation {
 }
 
 impl StrictModeVerification for UpdateOperation {
+    fn consumes_memory(&self) -> bool {
+        match self {
+            UpdateOperation::Upsert(op) => op.upsert.consumes_memory(),
+            UpdateOperation::Delete(op) => op.delete.consumes_memory(),
+            UpdateOperation::SetPayload(op) => op.set_payload.consumes_memory(),
+            UpdateOperation::OverwritePayload(op) => op.overwrite_payload.consumes_memory(),
+            UpdateOperation::DeletePayload(op) => op.delete_payload.consumes_memory(),
+            UpdateOperation::ClearPayload(op) => op.clear_payload.consumes_memory(),
+            UpdateOperation::UpdateVectors(op) => op.update_vectors.consumes_memory(),
+            UpdateOperation::DeleteVectors(op) => op.delete_vectors.consumes_memory(),
+        }
+    }
+
     fn query_limit(&self) -> Option<usize> {
         None
     }
@@ -195,6 +208,10 @@ impl StrictModeVerification for UpdateOperation {
 }
 
 impl StrictModeVerification for CreateFieldIndex {
+    fn consumes_memory(&self) -> bool {
+        true
+    }
+
     async fn check_custom(
         &self,
         collection: &Collection,
@@ -1037,13 +1054,28 @@ pub async fn do_create_vector_name(
     auth: Auth,
     hw_measurement_acc: HwMeasurementAcc,
 ) -> Result<UpdateResult, StorageError> {
-    use collection::operations::verification::new_unchecked_verification_pass;
-
     // Validate the vector name once at the single chokepoint that both REST and
     // gRPC entrypoints land in (REST also runs the same check via `VectorNamePath`).
     common::validation::validate_vector_name(&vector_name).map_err(|err| {
         StorageError::bad_input(format!("Invalid vector name `{vector_name}`: {err}"))
     })?;
+
+    // Reject before consensus submission if strict mode is violated — in
+    // particular, refuse creating a new named vector while process memory is
+    // already over the configured threshold, since this operation allocates
+    // storage for the new vector across every existing point.
+    let operation = shard::operations::CreateVectorName {
+        vector_name: vector_name.clone(),
+        config: config.clone(),
+    };
+    let pass = check_strict_mode(
+        &operation,
+        params.timeout_as_secs(),
+        &collection_name,
+        &dispatcher,
+        &auth,
+    )
+    .await?;
 
     let consensus_op = CreateNamedVector {
         collection_name: collection_name.clone(),
@@ -1051,7 +1083,6 @@ pub async fn do_create_vector_name(
         config: config.clone(),
     };
 
-    let pass = new_unchecked_verification_pass();
     let toc = dispatcher.toc(&auth, &pass).clone();
 
     dispatcher

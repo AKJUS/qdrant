@@ -1182,6 +1182,16 @@ pub struct StrictModeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(range(min = 0))]
     pub max_payload_index_count: Option<usize>,
+
+    /// Reject memory-consuming update operations (e.g. upsert, set payload)
+    /// when the process resident memory exceeds this percentage of total system
+    /// memory (or cgroup limit). Value in [1, 100]. Applied uniformly to external
+    /// and internal (replication) traffic — rejection is deterministic so it does
+    /// not cause replica divergence. Delete operations are not affected, so
+    /// callers can still free memory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[validate(range(min = 1, max = 100))]
+    pub max_resident_memory_percent: Option<u8>,
 }
 
 impl Eq for StrictModeConfig {}
@@ -1210,6 +1220,7 @@ impl Hash for StrictModeConfig {
             multivector_config,
             sparse_config,
             max_payload_index_count,
+            max_resident_memory_percent,
         } = self;
         enabled.hash(state);
         max_query_limit.hash(state);
@@ -1230,6 +1241,7 @@ impl Hash for StrictModeConfig {
         multivector_config.hash(state);
         sparse_config.hash(state);
         max_payload_index_count.hash(state);
+        max_resident_memory_percent.hash(state);
     }
 }
 
@@ -1332,6 +1344,11 @@ pub struct StrictModeConfigOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(range(min = 0))]
     pub max_payload_index_count: Option<usize>,
+
+    /// Reject memory-consuming update operations when resident memory exceeds this percentage of total RAM (1-100)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[anonymize(false)]
+    pub max_resident_memory_percent: Option<u8>,
 }
 
 impl From<StrictModeConfig> for StrictModeConfigOutput {
@@ -1357,6 +1374,7 @@ impl From<StrictModeConfig> for StrictModeConfigOutput {
             multivector_config,
             sparse_config,
             max_payload_index_count,
+            max_resident_memory_percent,
         } = config;
 
         Self {
@@ -1380,6 +1398,7 @@ impl From<StrictModeConfig> for StrictModeConfigOutput {
             multivector_config: multivector_config.map(StrictModeMultivectorConfigOutput::from),
             sparse_config: sparse_config.map(StrictModeSparseConfigOutput::from),
             max_payload_index_count,
+            max_resident_memory_percent,
         }
     }
 }
