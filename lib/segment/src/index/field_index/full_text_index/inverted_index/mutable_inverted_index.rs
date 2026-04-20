@@ -222,23 +222,33 @@ impl InvertedIndex for MutableInvertedIndex {
         }
     }
 
-    fn get_posting_len(&self, token_id: TokenId, _: &HardwareCounterCell) -> Option<usize> {
-        self.postings.get(token_id as usize).map(|x| x.len())
+    fn get_posting_len(
+        &self,
+        token_id: TokenId,
+        _: &HardwareCounterCell,
+    ) -> OperationResult<Option<usize>> {
+        Ok(self.postings.get(token_id as usize).map(|x| x.len()))
     }
 
-    fn vocab_with_postings_len_iter(&self) -> impl Iterator<Item = (&str, usize)> + '_ {
+    fn vocab_with_postings_len_iter(
+        &self,
+    ) -> impl Iterator<Item = OperationResult<(&str, usize)>> + '_ {
         self.vocab.iter().filter_map(|(token, &posting_idx)| {
             self.postings
                 .get(posting_idx as usize)
-                .map(|postings| (token.as_str(), postings.len()))
+                .map(|postings| Ok((token.as_str(), postings.len())))
         })
     }
 
-    fn check_match(&self, parsed_query: &ParsedQuery, point_id: PointOffsetType) -> bool {
-        match parsed_query {
+    fn check_match(
+        &self,
+        parsed_query: &ParsedQuery,
+        point_id: PointOffsetType,
+    ) -> OperationResult<bool> {
+        let matched = match parsed_query {
             ParsedQuery::AllTokens(query) => {
                 let Some(doc) = self.get_tokens(point_id) else {
-                    return false;
+                    return Ok(false);
                 };
 
                 // Check that all tokens are in document
@@ -246,7 +256,7 @@ impl InvertedIndex for MutableInvertedIndex {
             }
             ParsedQuery::Phrase(document) => {
                 let Some(doc) = self.get_document(point_id) else {
-                    return false;
+                    return Ok(false);
                 };
 
                 // Check that all tokens are in document, in order
@@ -254,13 +264,14 @@ impl InvertedIndex for MutableInvertedIndex {
             }
             ParsedQuery::AnyTokens(query) => {
                 let Some(doc) = self.get_tokens(point_id) else {
-                    return false;
+                    return Ok(false);
                 };
 
                 // Check that at least one token is in document
                 doc.has_any(query)
             }
-        }
+        };
+        Ok(matched)
     }
 
     fn values_is_empty(&self, point_id: PointOffsetType) -> bool {

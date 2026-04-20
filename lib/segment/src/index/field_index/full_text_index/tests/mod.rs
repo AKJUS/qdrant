@@ -188,7 +188,7 @@ fn test_prefix_search() {
     let query = index.parse_text_query("ROBO", &hw_counter).unwrap();
 
     for idx in res.iter().copied() {
-        assert!(index.check_match(&query, idx));
+        assert!(index.check_match(&query, idx).unwrap());
     }
 
     assert_eq!(res.len(), 3);
@@ -253,9 +253,9 @@ fn test_phrase_matching() {
         let text_query = index
             .parse_text_query("quick brown fox", &hw_counter)
             .unwrap();
-        assert!(index.check_match(&text_query, 0));
-        assert!(index.check_match(&text_query, 1));
-        assert!(index.check_match(&text_query, 2));
+        assert!(index.check_match(&text_query, 0).unwrap());
+        assert!(index.check_match(&text_query, 1).unwrap());
+        assert!(index.check_match(&text_query, 2).unwrap());
 
         let text_results: Vec<_> = index
             .filter_query(text_query, &hw_counter)
@@ -272,8 +272,8 @@ fn test_phrase_matching() {
         let phrase_query = index
             .parse_phrase_query("quick brown fox", &hw_counter)
             .unwrap();
-        assert!(index.check_match(&phrase_query, 0));
-        assert!(index.check_match(&phrase_query, 2));
+        assert!(index.check_match(&phrase_query, 0).unwrap());
+        assert!(index.check_match(&phrase_query, 2).unwrap());
 
         let phrase_results: Vec<_> = index
             .filter_query(phrase_query, &hw_counter)
@@ -307,7 +307,7 @@ fn test_phrase_matching() {
         let phrase_query = index
             .parse_phrase_query("brown brown fox", &hw_counter)
             .unwrap();
-        assert!(index.check_match(&phrase_query, 4));
+        assert!(index.check_match(&phrase_query, 4).unwrap());
 
         // Should only match document 4
         let filter_results: Vec<_> = index
@@ -378,7 +378,7 @@ fn test_ascii_folding_in_full_text_index_word() {
 
     // ASCII-only queries should match only when folding is enabled
     let query_enabled = index_enabled.parse_text_query("acao", &hw_counter).unwrap();
-    assert!(index_enabled.check_match(&query_enabled, 0));
+    assert!(index_enabled.check_match(&query_enabled, 0).unwrap());
 
     let results_enabled: Vec<_> = index_enabled
         .filter_query(query_enabled, &hw_counter)
@@ -398,7 +398,7 @@ fn test_ascii_folding_in_full_text_index_word() {
 
     // Non-folded query must work in both
     let query_acento = index_enabled.parse_text_query("ação", &hw_counter).unwrap();
-    assert!(index_enabled.check_match(&query_acento, 0));
+    assert!(index_enabled.check_match(&query_acento, 0).unwrap());
     let results_acento: Vec<_> = index_enabled
         .filter_query(query_acento, &hw_counter)
         .unwrap()

@@ -21,6 +21,22 @@ use crate::index::field_index::full_text_index::inverted_index::postings_iterato
     check_compressed_postings_phrase, intersect_compressed_postings_phrase_iterator,
 };
 
+/// Collect posting-list views for every token in `token_ids`.
+/// Returns `None` as soon as any token id is out of range.
+fn get_all_or_none<'a, V: PostingValue>(
+    postings: &'a [PostingList<V>],
+    token_ids: &[TokenId],
+) -> Option<Vec<(TokenId, PostingListView<'a, V>)>> {
+    token_ids
+        .iter()
+        .map(|&token_id| {
+            postings
+                .get(token_id as usize)
+                .map(|list| (token_id, list.view()))
+        })
+        .collect()
+}
+
 #[cfg_attr(test, derive(Clone))]
 #[derive(Debug)]
 pub struct ImmutableInvertedIndex {
@@ -188,11 +204,19 @@ impl ImmutableInvertedIndex {
 
         match &self.postings {
             ImmutablePostings::WithPositions(postings) => {
-                Either::Right(intersect_compressed_postings_phrase_iterator(
-                    phrase,
-                    |token_id| postings.get(*token_id as usize).map(PostingList::view),
-                    is_active,
-                ))
+                // Deduplicate phrase tokens: repeated tokens (e.g. "zn zn") must
+                // not fetch the same posting list twice, otherwise positions get
+                // added twice in `phrase_in_all_postings`.
+                let unique_tokens = phrase.to_token_set();
+                if let Some(selected_postings) = get_all_or_none(postings, unique_tokens.tokens()) {
+                    Either::Right(intersect_compressed_postings_phrase_iterator(
+                        phrase,
+                        selected_postings,
+                        is_active,
+                    ))
+                } else {
+                    Either::Left(std::iter::empty())
+                }
             }
             // cannot do phrase matching if there's no positional information
             ImmutablePostings::Ids(_postings) => Either::Left(std::iter::empty()),
@@ -212,9 +236,13 @@ impl ImmutableInvertedIndex {
 
         match &self.postings {
             ImmutablePostings::WithPositions(postings) => {
-                check_compressed_postings_phrase(phrase, point_id, |token_id| {
-                    postings.get(*token_id as usize).map(PostingList::view)
-                })
+                let unique_tokens = phrase.to_token_set();
+                let Some(selected_postings) = get_all_or_none(postings, unique_tokens.tokens())
+                else {
+                    return false;
+                };
+
+                check_compressed_postings_phrase(phrase, point_id, selected_postings)
             }
             // cannot do phrase matching if there's no positional information
             ImmutablePostings::Ids(_postings) => false,
@@ -270,24 +298,35 @@ impl InvertedIndex for ImmutableInvertedIndex {
         }
     }
 
-    fn get_posting_len(&self, token_id: TokenId, _: &HardwareCounterCell) -> Option<usize> {
-        self.postings.posting_len(token_id)
+    fn get_posting_len(
+        &self,
+        token_id: TokenId,
+        _: &HardwareCounterCell,
+    ) -> OperationResult<Option<usize>> {
+        Ok(self.postings.posting_len(token_id))
     }
 
-    fn vocab_with_postings_len_iter(&self) -> impl Iterator<Item = (&str, usize)> + '_ {
+    fn vocab_with_postings_len_iter(
+        &self,
+    ) -> impl Iterator<Item = OperationResult<(&str, usize)>> + '_ {
         self.vocab.iter().filter_map(|(token, &token_id)| {
             self.postings
                 .posting_len(token_id)
-                .map(|len| (token.as_str(), len))
+                .map(|len| Ok((token.as_str(), len)))
         })
     }
 
-    fn check_match(&self, parsed_query: &ParsedQuery, point_id: PointOffsetType) -> bool {
-        match parsed_query {
+    fn check_match(
+        &self,
+        parsed_query: &ParsedQuery,
+        point_id: PointOffsetType,
+    ) -> OperationResult<bool> {
+        let matched = match parsed_query {
             ParsedQuery::AllTokens(tokens) => self.check_has_subset(tokens, point_id),
             ParsedQuery::Phrase(phrase) => self.check_has_phrase(phrase, point_id),
             ParsedQuery::AnyTokens(tokens) => self.check_has_any(tokens, point_id),
-        }
+        };
+        Ok(matched)
     }
 
     fn values_is_empty(&self, point_id: PointOffsetType) -> bool {
@@ -446,21 +485,15 @@ fn create_compressed_postings_with_positions(
             .collect()
 }
 
-impl From<&MmapInvertedIndex> for ImmutableInvertedIndex {
-    fn from(index: &MmapInvertedIndex) -> Self {
+impl TryFrom<&MmapInvertedIndex> for ImmutableInvertedIndex {
+    type Error = OperationError;
+
+    fn try_from(index: &MmapInvertedIndex) -> OperationResult<Self> {
         let postings = match &index.storage.postings {
-            MmapPostingsEnum::Ids(postings) => ImmutablePostings::Ids(
-                postings
-                    .iter_postings()
-                    .map(PostingListView::to_owned)
-                    .collect(),
-            ),
-            MmapPostingsEnum::WithPositions(postings) => ImmutablePostings::WithPositions(
-                postings
-                    .iter_postings()
-                    .map(PostingListView::to_owned)
-                    .collect(),
-            ),
+            MmapPostingsEnum::Ids(postings) => ImmutablePostings::Ids(postings.all_postings()?),
+            MmapPostingsEnum::WithPositions(postings) => {
+                ImmutablePostings::WithPositions(postings.all_postings()?)
+            }
         };
 
         let vocab: HashMap<String, TokenId> = index
@@ -475,12 +508,12 @@ impl From<&MmapInvertedIndex> for ImmutableInvertedIndex {
             "postings and vocab must be the same size",
         );
 
-        ImmutableInvertedIndex {
+        Ok(ImmutableInvertedIndex {
             postings,
             vocab,
             point_to_tokens_count: index.storage.point_to_tokens_count.to_vec(),
             points_count: index.points_count(),
-        }
+        })
     }
 }
 

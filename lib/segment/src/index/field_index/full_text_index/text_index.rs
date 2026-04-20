@@ -54,7 +54,7 @@ impl FullTextIndex {
             // Load into RAM, use mmap as backing storage
             Some(Self::Immutable(ImmutableFullTextIndex::open_mmap(
                 mmap_index,
-            )))
+            )?))
         };
         Ok(index)
     }
@@ -156,7 +156,7 @@ impl FullTextIndex {
         query: &ParsedQuery,
         condition: &FieldCondition,
         hw_counter: &HardwareCounterCell,
-    ) -> CardinalityEstimation {
+    ) -> OperationResult<CardinalityEstimation> {
         match self {
             Self::Mutable(index) => index
                 .inverted_index
@@ -170,7 +170,11 @@ impl FullTextIndex {
         }
     }
 
-    pub fn check_match(&self, query: &ParsedQuery, point_id: PointOffsetType) -> bool {
+    pub fn check_match(
+        &self,
+        query: &ParsedQuery,
+        point_id: PointOffsetType,
+    ) -> OperationResult<bool> {
         match self {
             Self::Mutable(index) => index.inverted_index.check_match(query, point_id),
             Self::Immutable(index) => index.inverted_index.check_match(query, point_id),
@@ -522,7 +526,7 @@ impl PayloadFieldIndex for FullTextIndex {
             &parsed_query,
             condition,
             hw_counter,
-        )))
+        )?))
     }
 
     fn payload_blocks(

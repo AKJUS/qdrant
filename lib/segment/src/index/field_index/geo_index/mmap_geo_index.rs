@@ -294,7 +294,7 @@ impl<S: StoredGeoMapIndexStorage> StoredGeoMapIndex<S> {
                     .point_to_values
                     .check_values_any(idx, |v| check_fn(v), &hw_counter)
             })
-            .map(|r| r.unwrap_or(false))
+            .map(|r| r.unwrap_or(false)) // FIXME: don't silently ignore error
             .unwrap_or(false)
     }
 

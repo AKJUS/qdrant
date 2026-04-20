@@ -230,15 +230,18 @@ pub trait InvertedIndex {
         hw_counter: &'a HardwareCounterCell,
     ) -> OperationResult<Box<dyn Iterator<Item = PointOffsetType> + 'a>>;
 
-    fn get_posting_len(&self, token_id: TokenId, hw_counter: &HardwareCounterCell)
-    -> Option<usize>;
+    fn get_posting_len(
+        &self,
+        token_id: TokenId,
+        hw_counter: &HardwareCounterCell,
+    ) -> OperationResult<Option<usize>>;
 
     fn estimate_cardinality(
         &self,
         query: &ParsedQuery,
         condition: &FieldCondition,
         hw_counter: &HardwareCounterCell,
-    ) -> CardinalityEstimation {
+    ) -> OperationResult<CardinalityEstimation> {
         match query {
             ParsedQuery::AllTokens(tokens) => {
                 self.estimate_has_subset_cardinality(tokens, condition, hw_counter)
@@ -257,31 +260,31 @@ pub trait InvertedIndex {
         tokens: &TokenSet,
         condition: &FieldCondition,
         hw_counter: &HardwareCounterCell,
-    ) -> CardinalityEstimation {
+    ) -> OperationResult<CardinalityEstimation> {
         let points_count = self.points_count();
 
         let posting_lengths: Option<Vec<usize>> = tokens
             .tokens()
             .iter()
             .map(|&vocab_idx| self.get_posting_len(vocab_idx, hw_counter))
-            .collect();
+            .collect::<OperationResult<Option<Vec<usize>>>>()?;
         if posting_lengths.is_none() || points_count == 0 {
             // There are unseen tokens -> no matches
-            return CardinalityEstimation::exact(0)
-                .with_primary_clause(PrimaryCondition::Condition(Box::new(condition.clone())));
+            return Ok(CardinalityEstimation::exact(0)
+                .with_primary_clause(PrimaryCondition::Condition(Box::new(condition.clone()))));
         }
         let postings = posting_lengths.unwrap();
         if postings.is_empty() {
             // Empty request -> no matches
-            return CardinalityEstimation::exact(0)
-                .with_primary_clause(PrimaryCondition::Condition(Box::new(condition.clone())));
+            return Ok(CardinalityEstimation::exact(0)
+                .with_primary_clause(PrimaryCondition::Condition(Box::new(condition.clone()))));
         }
         // Smallest posting is the largest possible cardinality
         let smallest_posting = postings.iter().min().copied().unwrap();
 
         if postings.len() == 1 {
-            return CardinalityEstimation::exact(smallest_posting)
-                .with_primary_clause(PrimaryCondition::Condition(Box::new(condition.clone())));
+            return Ok(CardinalityEstimation::exact(smallest_posting)
+                .with_primary_clause(PrimaryCondition::Condition(Box::new(condition.clone()))));
         }
 
         let expected_frac: f64 = postings
@@ -289,12 +292,12 @@ pub trait InvertedIndex {
             .map(|posting| *posting as f64 / points_count as f64)
             .product();
         let exp = (expected_frac * points_count as f64) as usize;
-        CardinalityEstimation {
+        Ok(CardinalityEstimation {
             primary_clauses: vec![PrimaryCondition::Condition(Box::new(condition.clone()))],
             min: 0, // ToDo: make better estimation
             exp,
             max: smallest_posting,
-        }
+        })
     }
 
     fn estimate_has_any_cardinality(
@@ -302,39 +305,39 @@ pub trait InvertedIndex {
         tokens: &TokenSet,
         condition: &FieldCondition,
         hw_counter: &HardwareCounterCell,
-    ) -> CardinalityEstimation {
+    ) -> OperationResult<CardinalityEstimation> {
         let points_count = self.points_count();
 
-        let posting_lengths: Vec<_> = tokens
+        let posting_lengths: Vec<usize> = tokens
             .tokens()
             .iter()
-            .filter_map(|&vocab_idx| self.get_posting_len(vocab_idx, hw_counter))
-            .collect();
+            .filter_map(|&vocab_idx| self.get_posting_len(vocab_idx, hw_counter).transpose())
+            .collect::<OperationResult<Vec<usize>>>()?;
 
         if posting_lengths.is_empty() {
             // Empty request -> no matches
-            return CardinalityEstimation::exact(0)
-                .with_primary_clause(PrimaryCondition::Condition(Box::new(condition.clone())));
+            return Ok(CardinalityEstimation::exact(0)
+                .with_primary_clause(PrimaryCondition::Condition(Box::new(condition.clone()))));
         }
 
         // At least one posting is the largest possible cardinality
         let largest_posting = posting_lengths.iter().max().copied().unwrap();
 
         if posting_lengths.len() == 1 {
-            return CardinalityEstimation::exact(largest_posting)
-                .with_primary_clause(PrimaryCondition::Condition(Box::new(condition.clone())));
+            return Ok(CardinalityEstimation::exact(largest_posting)
+                .with_primary_clause(PrimaryCondition::Condition(Box::new(condition.clone()))));
         }
 
         let sum: usize = posting_lengths.iter().sum();
 
         let exp = expected_should_estimation(posting_lengths.into_iter(), points_count);
 
-        CardinalityEstimation {
+        Ok(CardinalityEstimation {
             primary_clauses: vec![PrimaryCondition::Condition(Box::new(condition.clone()))],
             min: largest_posting,
             exp,
             max: min(sum, points_count),
-        }
+        })
     }
 
     fn estimate_has_phrase_cardinality(
@@ -342,44 +345,46 @@ pub trait InvertedIndex {
         phrase: &Document,
         condition: &FieldCondition,
         hw_counter: &HardwareCounterCell,
-    ) -> CardinalityEstimation {
+    ) -> OperationResult<CardinalityEstimation> {
         if phrase.is_empty() {
-            return CardinalityEstimation::exact(0)
-                .with_primary_clause(PrimaryCondition::Condition(Box::new(condition.clone())));
+            return Ok(CardinalityEstimation::exact(0)
+                .with_primary_clause(PrimaryCondition::Condition(Box::new(condition.clone()))));
         }
 
         // Start with same cardinality estimation as has_subset
         let tokenset = phrase.to_token_set();
         let subset_estimation =
-            self.estimate_has_subset_cardinality(&tokenset, condition, hw_counter);
+            self.estimate_has_subset_cardinality(&tokenset, condition, hw_counter)?;
 
         // But we can restrict it by considering the phrase length
         let phrase_sq = phrase.len() * phrase.len();
 
-        CardinalityEstimation {
+        Ok(CardinalityEstimation {
             primary_clauses: vec![PrimaryCondition::Condition(Box::new(condition.clone()))],
             min: subset_estimation.min / phrase_sq,
             exp: subset_estimation.exp / phrase_sq,
             max: subset_estimation.max / phrase_sq,
-        }
+        })
     }
 
-    fn vocab_with_postings_len_iter(&self) -> impl Iterator<Item = (&str, usize)> + '_;
+    fn vocab_with_postings_len_iter(
+        &self,
+    ) -> impl Iterator<Item = OperationResult<(&str, usize)>> + '_;
 
     fn payload_blocks(
         &self,
         threshold: usize,
         key: PayloadKeyType,
     ) -> impl Iterator<Item = OperationResult<PayloadBlockCondition>> + '_ {
-        let map_filter_condition = move |(token, postings_len): (&str, usize)| {
-            if postings_len >= threshold {
+        let map_filter_condition = move |item: OperationResult<(&str, usize)>| match item {
+            Ok((token, postings_len)) if postings_len >= threshold => {
                 Some(Ok(PayloadBlockCondition {
                     condition: FieldCondition::new_match(key.clone(), Match::new_text(token)),
                     cardinality: postings_len,
                 }))
-            } else {
-                None
             }
+            Ok(_) => None,
+            Err(err) => Some(Err(err)),
         };
 
         // It might be very hard to predict possible combinations of conditions,
@@ -388,7 +393,11 @@ pub trait InvertedIndex {
             .filter_map(map_filter_condition)
     }
 
-    fn check_match(&self, parsed_query: &ParsedQuery, point_id: PointOffsetType) -> bool;
+    fn check_match(
+        &self,
+        parsed_query: &ParsedQuery,
+        point_id: PointOffsetType,
+    ) -> OperationResult<bool>;
 
     fn values_is_empty(&self, point_id: PointOffsetType) -> bool;
 
@@ -544,7 +553,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let imm_mmap = ImmutableInvertedIndex::from(&mmap);
+        let imm_mmap = ImmutableInvertedIndex::try_from(&mmap).unwrap();
 
         // Check same vocabulary
         for (token, token_id) in &immutable.vocab {
@@ -611,7 +620,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
 
-        let mut imm_mmap_index = ImmutableInvertedIndex::from(&mmap_index);
+        let mut imm_mmap_index = ImmutableInvertedIndex::try_from(&mmap_index).unwrap();
 
         let queries: Vec<_> = (0..100).map(|_| generate_query()).collect();
 

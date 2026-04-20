@@ -162,7 +162,26 @@ impl From<UniversalIoError> for OperationError {
             | UniversalIoError::InvalidFileIndex { .. } => Self::service_error(err.to_string()),
             UniversalIoError::BytemuckCast(_) => Self::service_error(err.to_string()),
             UniversalIoError::Uninitialized { .. } => Self::service_error(err.to_string()),
+            UniversalIoError::ZerocopySize(_) => Self::service_error(err.to_string()),
         }
+    }
+}
+
+impl<Src, Dst: ?Sized> From<zerocopy::SizeError<Src, Dst>> for OperationError
+where
+    zerocopy::SizeError<Src, Dst>: std::fmt::Display,
+{
+    fn from(err: zerocopy::SizeError<Src, Dst>) -> Self {
+        Self::service_error(format!("Zerocopy size error: {err}"))
+    }
+}
+
+impl<A, S, V> From<zerocopy::ConvertError<A, S, V>> for OperationError
+where
+    zerocopy::ConvertError<A, S, V>: std::fmt::Display,
+{
+    fn from(err: zerocopy::ConvertError<A, S, V>) -> Self {
+        Self::service_error(format!("Zerocopy convert error: {err}"))
     }
 }
 

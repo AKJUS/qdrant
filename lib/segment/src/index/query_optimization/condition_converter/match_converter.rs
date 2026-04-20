@@ -281,7 +281,10 @@ fn get_match_text_checker(
             };
 
             Some(Box::new(move |point_id: PointOffsetType| {
-                full_text_index.check_match(&parsed_query, point_id)
+                // FIXME: don't silently ignore errors. Log error? Update ConditionCheckerFn?
+                full_text_index
+                    .check_match(&parsed_query, point_id)
+                    .unwrap_or(false)
             }))
         }
         FieldIndex::BoolIndex(_)
