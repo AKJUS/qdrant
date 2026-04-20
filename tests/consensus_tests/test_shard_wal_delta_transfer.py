@@ -10,11 +10,13 @@ from .utils import *
 COLLECTION_NAME = "test_collection"
 
 
-def update_points_in_loop(peer_url, collection_name, offset=0, throttle=False, duration=None):
+def update_points_in_loop(peer_url, collection_name, offset=0, throttle=False, duration=None, stop_event=None):
     start = time.time()
     limit = 3
 
     while True:
+        if stop_event is not None and stop_event.is_set():
+            break
         upsert_random_points(peer_url, limit, collection_name, offset=offset)
         offset += limit
 
@@ -25,9 +27,25 @@ def update_points_in_loop(peer_url, collection_name, offset=0, throttle=False, d
 
 
 def run_update_points_in_background(peer_url, collection_name, init_offset=0, throttle=False, duration=None):
-    p = multiprocessing.Process(target=update_points_in_loop, args=(peer_url, collection_name, init_offset, throttle, duration))
+    stop_event = multiprocessing.Event()
+    p = multiprocessing.Process(target=update_points_in_loop, args=(peer_url, collection_name, init_offset, throttle, duration, stop_event))
     p.start()
+    p.stop_event = stop_event
     return p
+
+
+def stop_update_process(process, timeout=10):
+    """Signal the uploader to exit between requests, then join.
+
+    This ensures no HTTP upsert is in-flight when we return, so a subsequent
+    peer kill cannot interrupt partial replication. Falls back to SIGKILL if
+    the process does not exit within the timeout.
+    """
+    process.stop_event.set()
+    process.join(timeout=timeout)
+    if process.is_alive():
+        process.kill()
+        process.join()
 
 
 def check_data_consistency(data):
@@ -177,8 +195,8 @@ def test_shard_wal_delta_transfer_manual_recovery(tmp_path: pathlib.Path):
 
     sleep(1)
 
-    # Kill last peer
-    upload_process_3.kill()
+    # Stop uploader cleanly before killing peer so no upsert is in-flight
+    stop_update_process(upload_process_3)
     processes.pop().kill()
 
     upsert_random_points(peer_api_uris[0], 100, batch_size=5)
@@ -268,14 +286,14 @@ def test_shard_wal_delta_transfer_manual_recovery_chain(tmp_path: pathlib.Path):
 
     sleep(1)
 
-    # Kill 5th peer
-    upload_process_5.kill()
+    # Stop uploader cleanly before killing peer so no upsert is in-flight
+    stop_update_process(upload_process_5)
     processes.pop().kill()
 
     sleep(1)
 
-    # Kill 4th peer
-    upload_process_4.kill()
+    # Stop uploader cleanly before killing peer so no upsert is in-flight
+    stop_update_process(upload_process_4)
     processes.pop().kill()
 
     upsert_random_points(peer_api_uris[0], 100, batch_size=5)
@@ -391,8 +409,8 @@ def test_shard_wal_delta_transfer_abort_and_retry(tmp_path: pathlib.Path):
 
     sleep(1)
 
-    # Kill last peer
-    upload_process_3.kill()
+    # Stop uploader cleanly before killing peer so no upsert is in-flight
+    stop_update_process(upload_process_3)
     processes.pop().kill()
 
     sleep(1)
