@@ -1,26 +1,59 @@
 #![allow(dead_code)]
 
-const CENTROIDS_1BIT: &[f32] = &[-0.797_884_6, 0.797_884_6];
+use crate::turboquant::TQBits;
+
+/// 1-bit (2 centroids): Lloyd-Max for N(0,1)
+const CENTROIDS_1BIT: [f32; 2] = [-0.797_884_6, 0.797_884_6];
+const CENTROIDS_1BIT_BOUNDARIES: [f32; 1] = calculate_boundaries(CENTROIDS_1BIT);
 
 /// 2-bit (4 centroids): Lloyd-Max for N(0,1)
-const CENTROIDS_2BIT: &[f32] = &[-1.510, -0.4528, 0.4528, 1.510];
+const CENTROIDS_2BIT: [f32; 4] = [-1.510, -0.4528, 0.4528, 1.510];
+const CENTROIDS_2BIT_BOUNDARIES: [f32; 3] = calculate_boundaries(CENTROIDS_2BIT);
 
 /// 4-bit (16 centroids): Lloyd-Max for N(0,1)
-const CENTROIDS_4BIT: &[f32] = &[
+const CENTROIDS_4BIT: [f32; 16] = [
     -2.733, -2.069, -1.618, -1.256, -0.9424, -0.6568, -0.3881, -0.1284, 0.1284, 0.3881, 0.6568,
     0.9424, 1.256, 1.618, 2.069, 2.733,
 ];
+const CENTROIDS_4BIT_BOUNDARIES: [f32; 15] = calculate_boundaries(CENTROIDS_4BIT);
 
-/// Return the centroid slice for a given bit-width (1–4).
-///
-/// # Panics
-/// Panics if `bits` is not in [1, 2, 4]
-pub fn get_centroids(bits: u8) -> &'static [f32] {
-    match bits {
-        1 => CENTROIDS_1BIT,
-        2 => CENTROIDS_2BIT,
-        4 => CENTROIDS_4BIT,
-        _ => unreachable!("unsupported bit-width: {bits}"),
+/// Const evaluation of centroid boundaries. With this function we can have constant
+/// boundaries that are always derived from the original centroids all done at compile time.
+const fn calculate_boundaries<const N: usize, const B: usize>(centroids: [f32; N]) -> [f32; B] {
+    assert!(B + 1 == N, "B must equal N - 1");
+    let mut out = [0.0; B];
+    let mut i = 0;
+    while i < B {
+        out[i] = (centroids[i] + centroids[i + 1]) / 2.0;
+        i += 1;
+    }
+    out
+}
+
+impl TQBits {
+    /// Return the centroid slice for a given bit-width.
+    #[inline]
+    pub fn get_centroids(&self) -> &'static [f32] {
+        match self {
+            TQBits::Bits1 => &CENTROIDS_1BIT,
+            TQBits::Bits1_5 => unimplemented!("1.5Bit not yet implemented"),
+            TQBits::Bits2 => &CENTROIDS_2BIT,
+            TQBits::Bits4 => &CENTROIDS_4BIT,
+        }
+    }
+
+    /// Return the centroid decision boundaries for a given bit-width.
+    ///
+    /// Boundaries are the midpoints between consecutive centroids; a value maps to
+    /// centroid `i` if it falls between boundary `i-1` and boundary `i`.
+    #[inline]
+    pub fn get_centroid_boundaries(&self) -> &'static [f32] {
+        match self {
+            TQBits::Bits1 => &CENTROIDS_1BIT_BOUNDARIES,
+            TQBits::Bits1_5 => unimplemented!("1.5Bit not yet implemented"),
+            TQBits::Bits2 => &CENTROIDS_2BIT_BOUNDARIES,
+            TQBits::Bits4 => &CENTROIDS_4BIT_BOUNDARIES,
+        }
     }
 }
 
@@ -153,9 +186,9 @@ mod tests {
     #[test]
     fn test_matches_hardcoded_centroids() {
         let cases: &[(u32, &[f32])] = &[
-            (1, CENTROIDS_1BIT),
-            (2, CENTROIDS_2BIT),
-            (4, CENTROIDS_4BIT),
+            (1, &CENTROIDS_1BIT),
+            (2, &CENTROIDS_2BIT),
+            (4, &CENTROIDS_4BIT),
         ];
         for &(bits, expected) in cases {
             let centroids = solve_lloyd_max(1, bits);
