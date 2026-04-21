@@ -247,6 +247,17 @@ pub fn init_internal(
         .block_on(async {
             let socket = SocketAddr::from((host.parse::<IpAddr>().unwrap(), internal_grpc_port));
             let qdrant_service = QdrantService::default();
+            // Only enforce authentication on the internal API when the operator
+            // explicitly opts in. The API key is still forwarded unconditionally
+            // on outgoing internal requests, so the cluster keeps working
+            // across a rolling upgrade while `enforce_internal_auth` is false.
+            let internal_auth_layer = if settings.service.enforce_internal_auth.unwrap_or_default()
+            {
+                AuthKeys::try_create(&settings.service, toc.clone()).map(auth::AuthLayer::new)
+            } else {
+                None
+            };
+
             let points_internal_service =
                 PointsInternalService::new(toc.clone(), settings.service.clone());
             let qdrant_internal_service =
@@ -282,6 +293,7 @@ pub fn init_internal(
                 .layer(tonic_telemetry::TonicTelemetryLayer::new(
                     tonic_telemetry_collector,
                 ))
+                .option_layer(internal_auth_layer)
                 .into_inner();
 
             server
