@@ -27,7 +27,7 @@ use crate::vector_storage::dense::appendable_dense_vector_storage::{
     open_appendable_memmap_vector_storage_half,
 };
 use crate::vector_storage::{
-    MultiVectorStorage, VectorOffsetType, VectorStorage, VectorStorageEnum,
+    MultiVectorStorage, VectorOffset, VectorOffsetType, VectorStorage, VectorStorageEnum,
 };
 
 const VECTORS_DIR_PATH: &str = "vectors";
@@ -40,6 +40,16 @@ pub struct MultivectorMmapOffset {
     offset: u32,
     count: u32,
     capacity: u32,
+}
+
+impl VectorOffset for MultivectorMmapOffset {
+    fn offset(self) -> VectorOffsetType {
+        self.offset as _
+    }
+
+    fn multi_vector_count(self) -> usize {
+        self.count as _
+    }
 }
 
 #[derive(Debug)]
@@ -140,6 +150,35 @@ impl<T: PrimitiveVectorElement> MultiVectorStorage<T> for AppendableMmapMultiDen
                     dim: self.vectors.dim(),
                 }),
             })
+    }
+
+    fn for_each_in_batch_multi<F>(&self, keys: &[PointOffsetType], mut callback: F)
+    where
+        F: FnMut(usize, TypedMultiDenseVectorRef<'_, T>),
+    {
+        // Collect multi-vector offsets
+        let mut point_indexes = Vec::with_capacity(keys.len());
+        let mut offsets = Vec::with_capacity(keys.len());
+
+        for (point_index, offset) in self.offsets.iter(keys) {
+            // `PointOffsetType::multi_vector_count` is always 1, and `self.offsets` is `ChunkedVectors`
+            // with vector dimension set to 1, so we expect to get an `offset` "vector" of exactly 1 value
+            let &[offset] = offset.as_ref() else {
+                unreachable!();
+            };
+
+            point_indexes.push(point_index);
+            offsets.push(offset);
+        }
+
+        // Fetch multi-vectors
+        self.vectors
+            .for_each_in_batch(&offsets, |offset_index, vectors| {
+                let point_index = point_indexes[offset_index];
+                let vector = TypedMultiDenseVectorRef::new(vectors, self.vector_dim());
+
+                callback(point_index, vector);
+            });
     }
 
     fn iterate_inner_vectors(&self) -> impl Iterator<Item = Cow<'_, [T]>> + Clone + Send {
