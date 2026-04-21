@@ -36,9 +36,12 @@ struct Storage {
 }
 
 impl MutableNullIndex {
-    pub fn builder(path: &Path) -> OperationResult<MutableNullIndexBuilder> {
+    pub fn builder(
+        path: &Path,
+        total_point_count: usize,
+    ) -> OperationResult<MutableNullIndexBuilder> {
         Ok(MutableNullIndexBuilder(
-            Self::open(path, 0, true)?.ok_or_else(|| {
+            Self::open(path, total_point_count, true)?.ok_or_else(|| {
                 OperationError::service_error(format!(
                     "Failed to create and open mutable null index at path: {}",
                     path.display(),
@@ -287,7 +290,12 @@ impl PayloadFieldIndex for MutableNullIndex {
             if let Some(is_empty) = is_empty {
                 if *is_empty {
                     // Return points that don't have values
-                    Some(Box::new(self.storage.has_values_flags.iter_falses()))
+                    Some(Box::new(self.storage.has_values_flags.iter_falses().chain(
+                        {
+                            let end = self.storage.has_values_flags.len() as PointOffsetType;
+                            end..self.total_point_count as u32
+                        },
+                    )))
                 } else {
                     // Return points that have values
                     Some(Box::new(self.storage.has_values_flags.iter_trues()))
@@ -298,7 +306,10 @@ impl PayloadFieldIndex for MutableNullIndex {
                     Some(Box::new(self.storage.is_null_flags.iter_trues()))
                 } else {
                     // Return points that don't have null values
-                    Some(Box::new(self.storage.is_null_flags.iter_falses()))
+                    Some(Box::new(self.storage.is_null_flags.iter_falses().chain({
+                        let end = self.storage.is_null_flags.len() as PointOffsetType;
+                        end..self.total_point_count as u32
+                    })))
                 }
             } else {
                 None
@@ -421,9 +432,9 @@ mod tests {
         let null_value_in_array =
             Value::Array(vec![Value::String("test".to_string()), Value::Null]);
 
-        let mut builder = MutableNullIndex::builder(dir.path()).unwrap();
+        let n: PointOffsetType = 100;
 
-        let n = 100;
+        let mut builder = MutableNullIndex::builder(dir.path(), n as usize).unwrap();
 
         let hw_counter = HardwareCounterCell::new();
 
@@ -534,7 +545,7 @@ mod tests {
     #[test]
     fn test_manual_buffer_flushing() {
         let dir = TempDir::with_prefix("test_manual_buffer_flushing").unwrap();
-        let mut index = MutableNullIndex::builder(dir.path()).unwrap().0;
+        let mut index = MutableNullIndex::builder(dir.path(), 10).unwrap().0;
 
         let hw_counter = HardwareCounterCell::new();
 
