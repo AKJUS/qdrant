@@ -8,6 +8,7 @@ use common::counter::iterator_hw_measurement::HwMeasurementIteratorExt;
 use common::fs::{atomic_save_json, read_json};
 use common::generic_consts::Random;
 use common::mmap::{MmapSlice, create_and_ensure_length};
+use common::stored_bitslice::MmapBitSlice;
 use common::types::PointOffsetType;
 use common::universal_io::{
     MmapFile, OpenOptions, ReadRange, TypedStorage, UniversalRead, UniversalWrite,
@@ -22,7 +23,6 @@ use super::mutable_numeric_index::InMemoryNumericIndex;
 use crate::common::Flusher;
 use crate::common::buffered_update_bitslice::BufferedUpdateBitSlice;
 use crate::common::operation_error::{OperationError, OperationResult};
-use crate::common::stored_bitslice::MmapBitSlice;
 use crate::index::field_index::histogram::Histogram;
 use crate::index::field_index::numeric_point::{Numericable, Point};
 use crate::index::field_index::stored_point_to_values::{StoredPointToValues, StoredValue};

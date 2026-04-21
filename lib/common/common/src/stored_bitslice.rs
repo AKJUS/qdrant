@@ -10,12 +10,13 @@ use std::path::Path;
 
 use bitvec::mem::BitRegister;
 use bitvec::order::Lsb0;
-use common::bitvec::BitVec;
-use common::generic_consts::Random;
-use common::universal_io::{
+use itertools::Itertools;
+
+use crate::bitvec::BitVec;
+use crate::generic_consts::Random;
+use crate::universal_io::{
     Flusher, OpenOptions, ReadRange, Result, UniversalIoError, UniversalRead, UniversalWrite,
 };
-use itertools::Itertools;
 
 /// Number of bits per `BitStore` element.
 const BITS_PER_ELEMENT: u32 = BitStore::BITS;
@@ -24,7 +25,7 @@ type BitStore = u64;
 type BitSlice = bitvec::slice::BitSlice<BitStore, Lsb0>;
 
 /// Convenience alias for a bitslice backed by a memory-mapped file.
-pub type MmapBitSlice = StoredBitSlice<common::universal_io::MmapFile>;
+pub type MmapBitSlice = StoredBitSlice<crate::universal_io::MmapFile>;
 
 /// A storage-agnostic bitslice that supports both reading and writing bits.
 ///
@@ -100,6 +101,40 @@ impl<S: UniversalRead<BitStore>> StoredBitSlice<S> {
         match elements {
             Cow::Borrowed(slice) => Ok(Cow::Borrowed(BitSlice::from_slice(slice))),
             Cow::Owned(vec) => Ok(Cow::Owned(BitVec::from_vec(vec))),
+        }
+    }
+
+    /// Read a range of bits from the storage.
+    ///
+    /// The range is specified in bit indices. The underlying element reads are
+    /// widened to cover full `u64` boundaries, and the returned slice is trimmed
+    /// to the exact requested bit range.
+    pub fn read_bit_range(&self, range: std::ops::Range<u64>) -> Result<Cow<'_, BitSlice>> {
+        if range.is_empty() {
+            return Ok(Cow::Borrowed(BitSlice::empty()));
+        }
+
+        let elem_start = Self::element_idx(range.start);
+        let elem_end = range.end.div_ceil(u64::from(BITS_PER_ELEMENT));
+        let num_elements = elem_end - elem_start;
+
+        let elements = self.storage.read::<Random>(ReadRange {
+            byte_offset: elem_start * size_of::<BitStore>() as u64,
+            length: num_elements,
+        })?;
+
+        let bit_offset = Self::bit_within_element(range.start) as usize;
+        let bit_end = bit_offset + (range.end - range.start) as usize;
+
+        match elements {
+            Cow::Borrowed(slice) => {
+                let bits = BitSlice::from_slice(slice);
+                Ok(Cow::Borrowed(&bits[bit_offset..bit_end]))
+            }
+            Cow::Owned(vec) => {
+                let bits = BitVec::from_vec(vec);
+                Ok(Cow::Owned(bits[bit_offset..bit_end].to_bitvec()))
+            }
         }
     }
 
@@ -259,12 +294,11 @@ impl<S: UniversalWrite<u64>> StoredBitSlice<S> {
 mod tests {
     use std::io::Write;
 
-    use common::universal_io::MmapFile;
     use tempfile::NamedTempFile;
 
     use super::*;
 
-    impl StoredBitSlice<MmapFile> {
+    impl<S: UniversalWrite<BitStore>> StoredBitSlice<S> {
         /// Read-modify-write a single bit. Returns the previous value.
         ///
         /// Only writes to the backend if the element actually changed.

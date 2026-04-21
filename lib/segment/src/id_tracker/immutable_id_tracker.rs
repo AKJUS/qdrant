@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use byteorder::{ReadBytesExt, WriteBytesExt};
 use common::bitvec::{BitSlice, BitSliceExt as _, BitVec};
 use common::mmap::create_and_ensure_length;
+use common::stored_bitslice::MmapBitSlice;
 use common::types::PointOffsetType;
 use common::universal_io::{
     MmapFile, OpenOptions, SliceBufferedUpdateWrapper, TypedStorage, UniversalRead, UniversalWrite,
@@ -15,7 +16,6 @@ use uuid::Uuid;
 use crate::common::Flusher;
 use crate::common::buffered_update_bitslice::BufferedUpdateBitSlice;
 use crate::common::operation_error::{OperationError, OperationResult};
-use crate::common::stored_bitslice::MmapBitSlice;
 use crate::id_tracker::compressed::compressed_point_mappings::CompressedPointMappings;
 use crate::id_tracker::compressed::external_to_internal::CompressedExternalToInternal;
 use crate::id_tracker::compressed::internal_to_external::CompressedInternalToExternal;
