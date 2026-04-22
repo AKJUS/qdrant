@@ -22,11 +22,16 @@ fn dynamic_mmap_flag_count(c: &mut Criterion) {
     // Build dynamic mmap flags with random deletions
     let mut dynamic_flags = DynamicMmapFlags::open(dir.path(), false).unwrap();
     dynamic_flags.set_len(FLAG_COUNT).unwrap();
-    random_flags
-        .iter()
-        .enumerate()
-        .filter(|(_, flag)| **flag)
-        .for_each(|(i, _)| assert!(!dynamic_flags.set(i, true)));
+    dynamic_flags
+        .set_ascending_bits(
+            random_flags
+                .iter()
+                .enumerate()
+                .filter(|(_, flag)| **flag)
+                .map(|(i, _)| (i as u64, true)),
+        )
+        .unwrap();
+
     dynamic_flags.flusher()().unwrap();
     let real_count = random_flags.iter().filter(|&&flag| flag).count();
 
@@ -36,7 +41,7 @@ fn dynamic_mmap_flag_count(c: &mut Criterion) {
         b.iter(|| {
             let mut count = 0;
             for i in 0..FLAG_COUNT {
-                if dynamic_flags.get(i) {
+                if dynamic_flags.get(i).unwrap() {
                     count += 1;
                 }
                 check_process_stopped(&stopped).unwrap();
@@ -50,7 +55,7 @@ fn dynamic_mmap_flag_count(c: &mut Criterion) {
         b.iter(|| {
             let mut count = 0;
             for i in 0..FLAG_COUNT {
-                if dynamic_flags.get(i) {
+                if dynamic_flags.get(i).unwrap() {
                     count += 1;
                 }
             }
@@ -61,7 +66,7 @@ fn dynamic_mmap_flag_count(c: &mut Criterion) {
 
     group.bench_function("count-ones", |b| {
         b.iter(|| {
-            let count = dynamic_flags.count_flags();
+            let count = dynamic_flags.count_flags().unwrap();
             assert_eq!(count, real_count);
             black_box(count)
         });
