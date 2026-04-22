@@ -1255,13 +1255,11 @@ pub struct StrictModeConfigOutput {
 
     /// Max allowed `limit` parameter for all APIs that don't have their own max limit.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[validate(range(min = 1))]
     #[anonymize(false)]
     pub max_query_limit: Option<usize>,
 
     /// Max allowed `timeout` parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[validate(range(min = 1))]
     #[anonymize(false)]
     pub max_timeout: Option<usize>,
 
@@ -1342,7 +1340,6 @@ pub struct StrictModeConfigOutput {
 
     /// Max number of payload indexes in a collection
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[validate(range(min = 0))]
     pub max_payload_index_count: Option<usize>,
 
     /// Reject memory-consuming update operations when resident memory exceeds this percentage of total RAM (1-100)
