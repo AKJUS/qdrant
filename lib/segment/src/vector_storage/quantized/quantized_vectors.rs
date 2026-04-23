@@ -770,8 +770,13 @@ impl QuantizedVectors {
         });
         let on_disk_vector_storage = vector_storage.is_on_disk();
 
-        let vector_parameters =
-            Self::construct_vector_parameters(distance, dim, count, storage_type);
+        let vector_parameters = Self::construct_vector_parameters(
+            quantization_config,
+            distance,
+            dim,
+            count,
+            storage_type,
+        );
 
         let quantized_storage = match quantization_config {
             QuantizationConfig::Scalar(ScalarQuantization {
@@ -878,8 +883,13 @@ impl QuantizedVectors {
         let vectors_count = vector_storage.total_vector_count();
         let on_disk_vector_storage = vector_storage.is_on_disk();
 
-        let vector_parameters =
-            Self::construct_vector_parameters(distance, dim, inner_vectors_count, storage_type);
+        let vector_parameters = Self::construct_vector_parameters(
+            quantization_config,
+            distance,
+            dim,
+            inner_vectors_count,
+            storage_type,
+        );
 
         let offsets = (0..vectors_count as PointOffsetType)
             .map(|idx| {
@@ -2301,6 +2311,7 @@ impl QuantizedVectors {
     }
 
     fn construct_vector_parameters(
+        quantization_config: &QuantizationConfig,
         distance: Distance,
         dim: usize,
         deprecated_count: usize,
@@ -2313,7 +2324,15 @@ impl QuantizedVectors {
                 QuantizedVectorsStorageType::Immutable => Some(deprecated_count),
             },
             distance_type: match distance {
-                Distance::Cosine => quantization::DistanceType::Dot,
+                Distance::Cosine => match quantization_config {
+                    // Because of backwards compatibility,
+                    // we have to use Dot product for scalar, pq and binary quantization when distance is Cosine.
+                    // Only TurboQuant has a difference between Cosine and Dot product.
+                    QuantizationConfig::Scalar(_) => quantization::DistanceType::Dot,
+                    QuantizationConfig::Product(_) => quantization::DistanceType::Dot,
+                    QuantizationConfig::Binary(_) => quantization::DistanceType::Dot,
+                    QuantizationConfig::Turbo(_) => quantization::DistanceType::Cosine,
+                },
                 Distance::Euclid => quantization::DistanceType::L2,
                 Distance::Dot => quantization::DistanceType::Dot,
                 Distance::Manhattan => quantization::DistanceType::L1,
