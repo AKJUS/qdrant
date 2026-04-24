@@ -65,7 +65,13 @@ pub struct EncodedVectorsTQ<TStorage: EncodedStorage> {
 
 /// Encoded query type for Turbo Quant.
 pub struct EncodedQueryTQ {
-    rotated_query: Precomputed,
+    data: EncodedQueryTQData,
+    // TODO(turbo): add precomputed extras here when needed
+}
+
+pub enum EncodedQueryTQData {
+    Native(Precomputed),
+    // TODO(turbo): add other variants for SIMD-optimized precomputations, etc.
 }
 
 #[derive(Serialize, Deserialize)]
@@ -102,7 +108,6 @@ impl<TStorage: EncodedStorage> EncodedVectorsTQ<TStorage> {
         meta_path: Option<&Path>,
         stopped: &AtomicBool,
     ) -> Result<Self, EncodingError> {
-        let dim = vector_parameters.dim;
         debug_assert!(validate_vector_parameters(data.clone(), vector_parameters).is_ok());
 
         let metadata = Metadata {
@@ -112,8 +117,7 @@ impl<TStorage: EncodedStorage> EncodedVectorsTQ<TStorage> {
         };
 
         let quantizer = TurboQuantizer::new_from_metadata(&metadata);
-
-        let mut buf = vec![0.0f64; dim];
+        let mut buf = vec![0.0f64; quantizer.padded_dim];
 
         for vector in data {
             if stopped.load(Ordering::Relaxed) {
@@ -158,8 +162,8 @@ impl<TStorage: EncodedStorage> EncodedVectorsTQ<TStorage> {
             encoded_vectors,
             metadata,
             metadata_path: meta_path.map(PathBuf::from),
+            encoding_buffer: vec![0.0f64; quantizer.padded_dim],
             quantizer,
-            encoding_buffer: vec![0.0f64; dim],
         })
     }
 
@@ -169,13 +173,12 @@ impl<TStorage: EncodedStorage> EncodedVectorsTQ<TStorage> {
 
         let quantizer = TurboQuantizer::new_from_metadata(&metadata);
 
-        let dim = metadata.vector_parameters.dim;
         let result = Self {
             encoded_vectors,
             metadata,
             metadata_path: Some(meta_path.to_path_buf()),
+            encoding_buffer: vec![0.0f64; quantizer.padded_dim],
             quantizer,
-            encoding_buffer: vec![0.0f64; dim],
         };
 
         Ok(result)
@@ -224,9 +227,7 @@ impl<TStorage: EncodedStorage> EncodedVectors for EncodedVectorsTQ<TStorage> {
     }
 
     fn encode_query(&self, query: &[f32]) -> EncodedQueryTQ {
-        EncodedQueryTQ {
-            rotated_query: self.quantizer.precompute_query(query),
-        }
+        self.quantizer.precompute_query(query)
     }
 
     fn score_point(
@@ -318,7 +319,6 @@ impl<TStorage: EncodedStorage> EncodedVectors for EncodedVectorsTQ<TStorage> {
         hw_counter: &HardwareCounterCell,
     ) -> f32 {
         hw_counter.cpu_counter().incr_delta(bytes.len());
-        self.quantizer
-            .score_precomputed(&query.rotated_query, bytes)
+        self.quantizer.score_precomputed(query, bytes)
     }
 }
