@@ -7,6 +7,7 @@ use super::bool_index::immutable_bool_index::ImmutableBoolIndex;
 use super::bool_index::mutable_bool_index::MutableBoolIndex;
 use super::geo_index::{GeoMapIndexGridstoreBuilder, GeoMapIndexMmapBuilder};
 use super::map_index::{MapIndex, MapIndexGridstoreBuilder, MapIndexKey, MapIndexMmapBuilder};
+use super::null_index::{ImmutableNullIndex, NullIndex};
 use super::numeric_index::{
     Encodable, NumericIndexGridstoreBuilder, NumericIndexIntoInnerValue, NumericIndexMmapBuilder,
 };
@@ -53,8 +54,6 @@ impl IndexSelector<'_> {
         field: &JsonPath,
         payload_schema: &PayloadFieldSchema,
         index_type: &FullPayloadIndexType,
-        path: &Path,
-        total_point_count: usize,
         create_if_missing: bool,
         id_tracker: &IdTrackerEnum,
     ) -> OperationResult<Option<FieldIndex>> {
@@ -119,12 +118,9 @@ impl IndexSelector<'_> {
                 .map_new(field, create_if_missing)?
                 .map(FieldIndex::UuidMapIndex),
 
-            (PayloadIndexType::NullIndex, _) => MutableNullIndex::open(
-                &null_dir(path, field),
-                total_point_count,
-                create_if_missing,
-            )?
-            .map(FieldIndex::NullIndex),
+            (PayloadIndexType::NullIndex, _) => {
+                self.new_null_index(field, create_if_missing, id_tracker, index_type.mutability)?
+            }
 
             // Storage inconsistency. Should never happen.
             (index_type, schema) => {
@@ -181,14 +177,14 @@ impl IndexSelector<'_> {
             PayloadSchemaParams::Text(text_index_params) => self
                 .text_new(field, text_index_params.clone(), create_if_missing)?
                 .map(|index| vec![FieldIndex::FullTextIndex(index)]),
-            PayloadSchemaParams::Bool(_) => {
-                let mutability = match self {
-                    IndexSelector::Mmap(_) => IndexMutability::Immutable,
-                    IndexSelector::Gridstore(_) => IndexMutability::Mutable,
-                };
-                self.bool_new(field, create_if_missing, id_tracker, mutability)?
-                    .map(|index| vec![FieldIndex::BoolIndex(index)])
-            }
+            PayloadSchemaParams::Bool(_) => self
+                .bool_new(
+                    field,
+                    create_if_missing,
+                    id_tracker,
+                    self.default_mutability(),
+                )?
+                .map(|index| vec![FieldIndex::BoolIndex(index)]),
             PayloadSchemaParams::Datetime(_) => self
                 .numeric_new(field, create_if_missing)?
                 .map(|index| vec![FieldIndex::DatetimeIndex(index)]),
@@ -385,29 +381,70 @@ impl IndexSelector<'_> {
         }
     }
 
+    fn dir(&self) -> &Path {
+        match self {
+            IndexSelector::Mmap(IndexSelectorMmap { dir, is_on_disk: _ }) => dir,
+            IndexSelector::Gridstore(IndexSelectorGridstore { dir }) => dir,
+        }
+    }
+
+    /// Default mutability for indexes that share an on-disk format across
+    /// mutability variants (e.g. bool, null): Mmap segments are immutable,
+    /// Gridstore segments are appendable/mutable.
+    pub fn default_mutability(&self) -> IndexMutability {
+        match self {
+            IndexSelector::Mmap(_) => IndexMutability::Immutable,
+            IndexSelector::Gridstore(_) => IndexMutability::Mutable,
+        }
+    }
+
     pub fn null_builder(
-        dir: &Path,
+        &self,
         field: &JsonPath,
         total_point_count: usize,
     ) -> OperationResult<FieldIndexBuilder> {
-        // null index is always on disk and appendable
-        Ok(FieldIndexBuilder::NullIndex(MutableNullIndex::builder(
-            &null_dir(dir, field),
-            total_point_count,
-        )?))
+        let null_dir = null_dir(self.dir(), field);
+        let builder = match self {
+            IndexSelector::Mmap(_) => FieldIndexBuilder::ImmutableNullIndex(
+                ImmutableNullIndex::builder(&null_dir, total_point_count)?,
+            ),
+            IndexSelector::Gridstore(_) => FieldIndexBuilder::MutableNullIndex(
+                MutableNullIndex::builder(&null_dir, total_point_count)?,
+            ),
+        };
+        Ok(builder)
     }
 
     pub fn new_null_index(
-        dir: &Path,
+        &self,
         field: &JsonPath,
-        total_point_count: usize,
         create_if_missing: bool,
+        id_tracker: &IdTrackerEnum,
+        mutability: IndexMutability,
     ) -> OperationResult<Option<FieldIndex>> {
-        // null index is always on disk and is appendable
-        Ok(
-            MutableNullIndex::open(&null_dir(dir, field), total_point_count, create_if_missing)?
-                .map(FieldIndex::NullIndex),
-        )
+        let total_point_count = id_tracker.total_point_count();
+        let null_dir = null_dir(self.dir(), field);
+        // `MutableNullIndex` and `ImmutableNullIndex` share the same on-disk
+        // format; stored mutability picks which in-memory wrapper to build.
+        // Gridstore segments are always appendable, so the null index is
+        // always mutable regardless of the stored mutability marker.
+        match (self, mutability) {
+            (IndexSelector::Mmap(_), IndexMutability::Immutable) => Ok(ImmutableNullIndex::open(
+                &null_dir,
+                total_point_count,
+                id_tracker.deleted_point_bitslice(),
+            )?
+            .map(NullIndex::Immutable)
+            .map(FieldIndex::NullIndex)),
+            (IndexSelector::Mmap(_), IndexMutability::Mutable)
+            | (IndexSelector::Gridstore(_), _) => {
+                Ok(
+                    MutableNullIndex::open(&null_dir, total_point_count, create_if_missing)?
+                        .map(NullIndex::Mutable)
+                        .map(FieldIndex::NullIndex),
+                )
+            }
+        }
     }
 
     fn text_new(

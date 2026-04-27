@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use common::bitvec::BitSlice;
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::types::PointOffsetType;
 use fs_err as fs;
@@ -69,6 +70,23 @@ impl MutableNullIndex {
         }
 
         Ok(Some(Self::open_or_create(path, total_point_count)?))
+    }
+
+    pub(super) fn open_immutable(
+        path: &Path,
+        total_point_count: usize,
+        deleted: &BitSlice,
+    ) -> OperationResult<Option<Self>> {
+        let mutable_null_index = Self::open(path, total_point_count, false)?;
+        match mutable_null_index {
+            Some(mut mutable_null_index) => {
+                for pos in deleted.iter_ones() {
+                    mutable_null_index.remove_point_immutable(pos as PointOffsetType);
+                }
+                Ok(Some(mutable_null_index))
+            }
+            None => Ok(None),
+        }
     }
 
     fn open_or_create(path: &Path, total_point_count: usize) -> OperationResult<Self> {
@@ -167,6 +185,17 @@ impl MutableNullIndex {
         hw_counter.payload_index_io_write_counter().incr_delta(2);
 
         Ok(())
+    }
+
+    pub(super) fn remove_point_immutable(&mut self, id: PointOffsetType) {
+        // Update bitmaps immediately
+        self.storage.has_values_flags.set_immutable(id, false);
+        self.storage.is_null_flags.set_immutable(id, false);
+
+        // N.B. We do not update total_point_count because it comes from the id tracker and is not not changed
+        // in non-appendable segments.
+
+        // N.B. No I/O, do not update hw_counter.
     }
 
     pub fn values_count(&self, id: PointOffsetType) -> usize {
