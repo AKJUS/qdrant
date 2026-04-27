@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use chrono::DateTime;
+use common::bitvec::{BitSlice, BitVec};
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::types::PointOffsetType;
 use gridstore::Blob;
@@ -172,7 +173,11 @@ where
     Vec<T>: Blob,
 {
     /// Load immutable mmap based index, either in RAM or on disk
-    pub fn new_mmap(path: &Path, is_on_disk: bool) -> OperationResult<Option<Self>> {
+    pub fn new_mmap(
+        path: &Path,
+        is_on_disk: bool,
+        deleted_points: &BitSlice,
+    ) -> OperationResult<Option<Self>> {
         // Low-memory mode downgrades the in-RAM `Immutable` wrapper to the
         // pure-mmap `Storage` variant at load time. Files are shared between
         // variants; the persisted `is_on_disk` flag in `mmap_index` is
@@ -180,7 +185,8 @@ where
         let effective_is_on_disk =
             is_on_disk || common::low_memory::low_memory_mode().prefer_disk();
 
-        let Some(mmap_index) = MmapNumericIndex::open(path, effective_is_on_disk)? else {
+        let Some(mmap_index) = MmapNumericIndex::open(path, effective_is_on_disk, deleted_points)?
+        else {
             // Files don't exist, cannot load
             return Ok(None);
         };
@@ -455,7 +461,7 @@ where
         match self {
             NumericIndexInner::Mutable(index) => index.ram_usage_bytes(),
             NumericIndexInner::Immutable(index) => index.ram_usage_bytes(),
-            NumericIndexInner::Mmap(_) => 0, // mmap-backed, accounted via files
+            NumericIndexInner::Mmap(index) => index.ram_usage_bytes(),
         }
     }
 
@@ -508,8 +514,12 @@ where
     Vec<T>: Blob,
 {
     /// Load immutable mmap based index, either in RAM or on disk
-    pub fn new_mmap(path: &Path, is_on_disk: bool) -> OperationResult<Option<Self>> {
-        let index = NumericIndexInner::new_mmap(path, is_on_disk)?;
+    pub fn new_mmap(
+        path: &Path,
+        is_on_disk: bool,
+        deleted_points: &BitSlice,
+    ) -> OperationResult<Option<Self>> {
+        let index = NumericIndexInner::new_mmap(path, is_on_disk, deleted_points)?;
 
         Ok(index.map(|inner| Self {
             inner,
@@ -526,7 +536,11 @@ where
         }))
     }
 
-    pub fn builder_mmap(path: &Path, is_on_disk: bool) -> NumericIndexMmapBuilder<T, P>
+    pub fn builder_mmap(
+        path: &Path,
+        is_on_disk: bool,
+        deleted_points: &BitSlice,
+    ) -> NumericIndexMmapBuilder<T, P>
     where
         Self: ValueIndexer<ValueType = P> + NumericIndexIntoInnerValue<T, P>,
     {
@@ -534,6 +548,7 @@ where
             path: path.to_owned(),
             in_memory_index: InMemoryNumericIndex::default(),
             is_on_disk,
+            deleted_points: deleted_points.to_owned(),
             _phantom: PhantomData,
         }
     }
@@ -660,6 +675,7 @@ where
     path: PathBuf,
     in_memory_index: InMemoryNumericIndex<T>,
     is_on_disk: bool,
+    deleted_points: BitVec,
     _phantom: PhantomData<P>,
 }
 
@@ -701,7 +717,12 @@ where
     }
 
     fn finalize(self) -> OperationResult<Self::FieldIndexType> {
-        let inner = MmapNumericIndex::build(self.in_memory_index, &self.path, self.is_on_disk)?;
+        let inner = MmapNumericIndex::build(
+            self.in_memory_index,
+            &self.path,
+            self.is_on_disk,
+            &self.deleted_points,
+        )?;
         Ok(NumericIndex {
             inner: NumericIndexInner::Mmap(inner),
             _phantom: PhantomData,

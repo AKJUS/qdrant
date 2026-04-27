@@ -227,6 +227,7 @@ mod tests {
     use std::sync::Arc;
 
     use atomic_refcell::AtomicRefCell;
+    use common::bitvec::BitVec;
     use common::counter::hardware_counter::HardwareCounterCell;
     use serde_json::{Value, from_value, json};
 
@@ -344,10 +345,13 @@ mod tests {
             PayloadStorageEnum::InMemoryPayloadStorage(InMemoryPayloadStorage::default()),
         )));
         let hw_counter = HardwareCounterCell::new();
+        // No deletions in this test — sized to comfortably exceed the
+        // stored deletion bitslice for the few points added below.
+        let deleted_points = BitVec::repeat(false, 64);
 
         // Create a field index for a number.
         let dir = tempfile::tempdir().unwrap();
-        let mut builder = NumericIndex::builder_mmap(dir.path(), false);
+        let mut builder = NumericIndex::builder_mmap(dir.path(), false, &deleted_points);
         builder.add_point(0, &[&42.into()], &hw_counter).unwrap();
         builder.add_point(1, &[], &hw_counter).unwrap();
         builder
@@ -372,7 +376,7 @@ mod tests {
 
         // Create a field index for datetime
         let dir = tempfile::tempdir().unwrap();
-        let mut builder = NumericIndex::builder_mmap(dir.path(), false);
+        let mut builder = NumericIndex::builder_mmap(dir.path(), false, &deleted_points);
 
         builder
             .add_point(0, &[&json!("2023-01-01T00:00:00Z")], &hw_counter)

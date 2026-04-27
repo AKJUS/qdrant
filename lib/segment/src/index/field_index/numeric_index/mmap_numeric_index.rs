@@ -1,18 +1,17 @@
 use std::borrow::{Borrow, Cow};
-use std::ops::Bound;
+use std::ops::{BitOrAssign, Bound};
 use std::path::{Path, PathBuf};
 
+use common::bitvec::{BitSlice, BitSliceExt, BitVec};
 use common::counter::conditioned_counter::ConditionedCounter;
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::counter::iterator_hw_measurement::HwMeasurementIteratorExt;
-use common::fs::{atomic_save_json, read_json};
+use common::fs::{atomic_save_json, clear_disk_cache, read_json};
 use common::generic_consts::Random;
 use common::mmap::{MmapSlice, create_and_ensure_length};
 use common::stored_bitslice::MmapBitSlice;
 use common::types::PointOffsetType;
-use common::universal_io::{
-    MmapFile, OpenOptions, ReadRange, TypedStorage, UniversalRead, UniversalWrite,
-};
+use common::universal_io::{MmapFile, OpenOptions, ReadRange, TypedStorage, UniversalRead};
 use fs_err as fs;
 use itertools::Either;
 use memmap2::MmapMut;
@@ -21,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use super::Encodable;
 use super::mutable_numeric_index::InMemoryNumericIndex;
 use crate::common::Flusher;
-use crate::common::buffered_update_bitslice::BufferedUpdateBitSlice;
 use crate::common::operation_error::{OperationError, OperationResult};
 use crate::index::field_index::histogram::Histogram;
 use crate::index::field_index::numeric_point::{Numericable, Point};
@@ -31,6 +29,17 @@ const PAIRS_PATH: &str = "data.bin";
 const DELETED_PATH: &str = "deleted.bin";
 const CONFIG_PATH: &str = "mmap_field_index_config.json";
 
+/// Mmap-backed immutable numeric index.
+///
+/// On-disk state (`data.bin`, `deleted.bin`, `point_to_values.*`, etc.) is
+/// written once during [`Self::build`] and not mutated afterwards: `deleted.bin`
+/// records only the points whose payload was empty at build time.
+///
+/// Runtime deletions live in the in-memory `Storage::deleted` bitvec. They are
+/// **not persisted** — [`Self::flusher`] is a no-op and [`Self::remove_point`]
+/// only updates the in-memory bitvec. Callers must re-supply the authoritative
+/// deletion set (typically `id_tracker.deleted_point_bitslice()`) via the
+/// `deleted_points` argument to [`Self::open`] on reload.
 pub struct MmapNumericIndex<T: Encodable + Numericable + Default + StoredValue + 'static> {
     path: PathBuf,
     pub(super) storage: Storage<T, MmapFile>,
@@ -42,12 +51,30 @@ pub struct MmapNumericIndex<T: Encodable + Numericable + Default + StoredValue +
 
 pub(super) struct Storage<
     T: Encodable + Numericable + Default + StoredValue + 'static,
-    S: UniversalWrite<u64> + UniversalRead<Point<T>> + UniversalRead<u8>,
+    S: UniversalRead<Point<T>> + UniversalRead<u8>,
 > {
-    deleted: BufferedUpdateBitSlice<S>,
+    deleted: BitVec,
     // sorted pairs (id + value), sorted by value (by id if values are equal)
     pairs: TypedStorage<S, Point<T>>,
     pub(super) point_to_values: StoredPointToValues<T, S>,
+}
+
+impl<
+    T: Encodable + Numericable + Default + StoredValue + 'static,
+    S: UniversalRead<Point<T>> + UniversalRead<u8>,
+> Storage<T, S>
+{
+    pub(crate) fn ram_usage_bytes(&self) -> usize {
+        let Self {
+            deleted,
+            pairs,
+            point_to_values,
+        } = self;
+
+        deleted.capacity().div_ceil(u8::BITS as usize)
+            + pairs.ram_usage_bytes()
+            + point_to_values.ram_usage_bytes()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +87,7 @@ impl<T: Encodable + Numericable + Default + StoredValue + bytemuck::Pod> MmapNum
         in_memory_index: InMemoryNumericIndex<T>,
         path: &Path,
         is_on_disk: bool,
+        deleted_points: &BitSlice,
     ) -> OperationResult<Self> {
         fs::create_dir_all(path)?;
 
@@ -118,13 +146,17 @@ impl<T: Encodable + Numericable + Default + StoredValue + bytemuck::Pod> MmapNum
             deleted.flusher()()?;
         }
 
-        Self::open(path, is_on_disk)?.ok_or_else(|| {
+        Self::open(path, is_on_disk, deleted_points)?.ok_or_else(|| {
             OperationError::service_error("Failed to open MmapNumericIndex after building it")
         })
     }
 
     /// Open and load mmap numeric index from the given path
-    pub fn open(path: &Path, is_on_disk: bool) -> OperationResult<Option<Self>> {
+    pub fn open(
+        path: &Path,
+        is_on_disk: bool,
+        deleted_points: &BitSlice,
+    ) -> OperationResult<Option<Self>> {
         let pairs_path = path.join(PAIRS_PATH);
         let deleted_path = path.join(DELETED_PATH);
         let config_path = path.join(CONFIG_PATH);
@@ -136,8 +168,6 @@ impl<T: Encodable + Numericable + Default + StoredValue + bytemuck::Pod> MmapNum
 
         let histogram = Histogram::<T>::load(path)?;
         let config: MmapNumericIndexConfig = read_json(&config_path)?;
-        let deleted = MmapBitSlice::open(&deleted_path, OpenOptions::default())?;
-        let deleted_count = deleted.count_ones()?;
         let do_populate = !is_on_disk;
 
         let pairs_options = OpenOptions {
@@ -151,12 +181,26 @@ impl<T: Encodable + Numericable + Default + StoredValue + bytemuck::Pod> MmapNum
         let pairs = TypedStorage::open(pairs_path, pairs_options)?;
 
         let point_to_values = StoredPointToValues::open(path, do_populate)?;
+        let mut deleted = deleted_points.to_owned();
+
+        let deleted_payload_mmap = MmapBitSlice::open(&deleted_path, OpenOptions::default())?;
+        let deleted_payloads_bitslice = deleted_payload_mmap.read_all()?;
+
+        // `deleted` length must match `point_to_values.len()` because it only
+        // tracks the index's contents. The id-tracker's deleted mask can be
+        // shorter or longer; if shorter, the missing entries default to live
+        // (the id-tracker is the source of truth for deletions, and a shorter
+        // mask just means it doesn't yet know about those higher offsets).
+        deleted.resize(point_to_values.len(), false);
+        deleted.bitor_assign(deleted_payloads_bitslice.as_ref());
+
+        let deleted_count = deleted.count_ones();
 
         Ok(Some(Self {
             path: path.to_path_buf(),
             storage: Storage {
+                deleted,
                 pairs,
-                deleted: BufferedUpdateBitSlice::new(deleted),
                 point_to_values,
             },
             histogram,
@@ -190,14 +234,20 @@ impl<T: Encodable + Numericable + Default + StoredValue + bytemuck::Pod> MmapNum
     }
 
     pub fn immutable_files(&self) -> Vec<PathBuf> {
-        let mut files = vec![self.path.join(PAIRS_PATH), self.path.join(CONFIG_PATH)];
+        let mut files = vec![
+            self.path.join(PAIRS_PATH),
+            self.path.join(DELETED_PATH),
+            self.path.join(CONFIG_PATH),
+        ];
         files.extend(self.storage.point_to_values.immutable_files());
         files.extend(Histogram::<T>::immutable_files(&self.path));
         files
     }
 
+    /// No-op flusher: the on-disk state is build-time only. See the type-level
+    /// docs on [`MmapNumericIndex`] for the deletion durability contract.
     pub fn flusher(&self) -> Flusher {
-        self.storage.deleted.flusher()
+        Box::new(|| Ok(()))
     }
 
     pub fn check_values_any(
@@ -208,7 +258,7 @@ impl<T: Encodable + Numericable + Default + StoredValue + bytemuck::Pod> MmapNum
     ) -> OperationResult<bool> {
         let hw_counter = self.make_conditioned_counter(hw_counter);
 
-        if self.storage.deleted.get(idx as usize) == Some(false) {
+        if self.storage.deleted.get_bit(idx as usize) == Some(false) {
             self.storage
                 .point_to_values
                 .check_values_any(idx, |v| check_fn(v), &hw_counter)
@@ -218,7 +268,7 @@ impl<T: Encodable + Numericable + Default + StoredValue + bytemuck::Pod> MmapNum
     }
 
     pub fn get_values(&self, idx: PointOffsetType) -> Option<Box<dyn Iterator<Item = T> + '_>> {
-        if self.storage.deleted.get(idx as usize) == Some(false) {
+        if self.storage.deleted.get_bit(idx as usize) == Some(false) {
             Some(Box::new(
                 self.storage
                     .point_to_values
@@ -233,7 +283,7 @@ impl<T: Encodable + Numericable + Default + StoredValue + bytemuck::Pod> MmapNum
     }
 
     pub fn values_count(&self, idx: PointOffsetType) -> Option<usize> {
-        if self.storage.deleted.get(idx as usize) == Some(false) {
+        if self.storage.deleted.get_bit(idx as usize) == Some(false) {
             self.storage.point_to_values.get_values_count(idx).ok()?
         } else {
             None
@@ -272,9 +322,13 @@ impl<T: Encodable + Numericable + Default + StoredValue + bytemuck::Pod> MmapNum
             .map(|Point { val, idx, .. }| (val, idx)))
     }
 
+    /// Marks `idx` as deleted in the in-memory deletion bitvec.
+    ///
+    /// Not persisted: on reopen, deletions must be re-supplied via the
+    /// `deleted_points` argument to [`Self::open`].
     pub fn remove_point(&mut self, idx: PointOffsetType) {
         let idx = idx as usize;
-        if idx < self.storage.deleted.len() && !self.storage.deleted.get(idx).unwrap_or(true) {
+        if idx < self.storage.deleted.len() && !self.storage.deleted.get_bit(idx).unwrap_or(true) {
             self.storage.deleted.set(idx, true);
             self.deleted_count += 1;
         }
@@ -391,7 +445,7 @@ impl<T: Encodable + Numericable + Default + StoredValue + bytemuck::Pod> MmapNum
 
         let deleted = &self.storage.deleted;
 
-        Ok(iter.filter(move |point| !deleted.get(point.idx as usize).unwrap_or(true)))
+        Ok(iter.filter(move |point| !deleted.get_bit(point.idx as usize).unwrap_or(true)))
     }
 
     fn make_conditioned_counter<'a>(
@@ -416,7 +470,7 @@ impl<T: Encodable + Numericable + Default + StoredValue + bytemuck::Pod> MmapNum
     /// Drop disk cache.
     pub fn clear_cache(&self) -> OperationResult<()> {
         let Self {
-            path: _,
+            path,
             storage,
             histogram: _,
             deleted_count: _,
@@ -424,13 +478,26 @@ impl<T: Encodable + Numericable + Default + StoredValue + bytemuck::Pod> MmapNum
             is_on_disk: _,
         } = self;
         let Storage {
-            deleted,
+            deleted: _,
             pairs,
             point_to_values,
         } = storage;
         pairs.clear_ram_cache()?;
-        deleted.clear_cache()?;
+        clear_disk_cache(&path.join(DELETED_PATH))?;
         point_to_values.clear_cache()?;
         Ok(())
+    }
+
+    pub(crate) fn ram_usage_bytes(&self) -> usize {
+        let Self {
+            path: _,
+            storage,
+            histogram,
+            deleted_count: _,
+            max_values_per_point: _,
+            is_on_disk: _,
+        } = self;
+
+        histogram.ram_usage_bytes() + storage.ram_usage_bytes()
     }
 }
