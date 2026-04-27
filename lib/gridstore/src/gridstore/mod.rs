@@ -310,11 +310,12 @@ impl<V: Blob> Gridstore<V> {
             return Ok(None);
         };
 
-        let raw = self.with_view(|view| view.read_from_pages::<Random>(pointer))?;
-        let decompressed = self.with_view(|view| view.decompress(raw));
-        let value = V::from_bytes(&decompressed);
-
-        Ok(Some(value))
+        self.with_view(|view| {
+            let raw = view.read_from_pages::<Random>(pointer)?;
+            let decompressed = view.decompress(raw);
+            let value = V::from_bytes(&decompressed);
+            Ok(Some(value))
+        })
     }
 
     /// Clear the storage, going back to the initial state.
@@ -372,6 +373,20 @@ impl<V: Blob> Gridstore<V> {
         hw_counter: &HardwareCounterCell,
     ) -> Result<Option<V>> {
         self.with_view(|view| view.get_value::<P>(point_offset, hw_counter))
+    }
+
+    pub fn for_each_in_batch<P, F, E>(
+        &self,
+        offsets: &[PointOffset],
+        callback: F,
+        hw_counter: &HardwareCounterCell,
+    ) -> std::result::Result<(), E>
+    where
+        P: AccessPattern,
+        F: FnMut(usize, Option<V>) -> std::result::Result<(), E>,
+        E: From<GridstoreError>,
+    {
+        self.with_view(|view| view.for_each_in_batch::<P, F, E>(offsets, callback, hw_counter))
     }
 
     #[cfg(test)]

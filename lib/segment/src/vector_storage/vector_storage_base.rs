@@ -206,6 +206,14 @@ pub trait SparseVectorStorage: VectorStorage {
         &self,
         key: PointOffsetType,
     ) -> OperationResult<Option<SparseVector>>;
+
+    fn for_each_in_sparse_batch<F>(
+        &self,
+        keys: &[PointOffsetType],
+        callback: F,
+    ) -> OperationResult<()>
+    where
+        F: FnMut(usize, SparseVector);
 }
 
 pub trait MultiVectorStorage<T: PrimitiveVectorElement>: VectorStorage {
