@@ -13,6 +13,7 @@ use tokio::runtime::Handle;
 use tokio::sync::RwLock;
 
 use crate::collection::payload_index_schema::PayloadIndexSchema;
+use crate::common::adaptive_handle::AdaptiveSearchHandle;
 use crate::config::{CollectionConfigInternal, CollectionParams, WalConfig};
 use crate::operations::point_ops::{
     PointInsertOperationsInternal, PointOperations, PointStructPersisted,
@@ -93,7 +94,8 @@ async fn build_shard() -> (LocalShard, TempDir) {
     let payload_index_schema: Arc<SaveOnDisk<PayloadIndexSchema>> =
         Arc::new(SaveOnDisk::load_or_init_default(payload_index_schema_file).unwrap());
 
-    let current_runtime = Handle::current();
+    let update_runtime = Handle::current();
+    let current_runtime = AdaptiveSearchHandle::current_for_tests();
 
     let shard = LocalShard::build(
         0,
@@ -102,7 +104,7 @@ async fn build_shard() -> (LocalShard, TempDir) {
         Arc::new(RwLock::new(config.clone())),
         Arc::new(Default::default()),
         payload_index_schema,
-        current_runtime.clone(),
+        update_runtime.clone(),
         current_runtime.clone(),
         ResourceBudget::default(),
         optimizer_config,
