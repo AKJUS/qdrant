@@ -45,12 +45,13 @@ impl<S: UniversalRead<u8> + Send + Sync + 'static> StorageRead for StorageReadSe
         let auth = extract_auth(&mut request);
         let FileExistsRequest {
             collection_name,
+            shard_id,
             path,
         } = request.into_inner();
-        let base = self
-            .check_and_resolve_collection(&auth, &collection_name, "file_exists")
+        let (base, collections_root) = self
+            .check_and_resolve_shard(&auth, &collection_name, shard_id, "file_exists")
             .await?;
-        let path = Self::resolve_path(&base, &path)?;
+        let path = Self::resolve_path(&base, &collections_root, &path)?;
 
         let exists = tokio::task::spawn_blocking(move || match S::exists(&path) {
             Ok(exists) => Ok(exists),
@@ -65,7 +66,7 @@ impl<S: UniversalRead<u8> + Send + Sync + 'static> StorageRead for StorageReadSe
     }
 
     // List files via UniversalReadFileOps::list_files(prefix_path).
-    // Return paths relative to the collection directory.
+    // Return paths relative to the shard directory.
     async fn list_files(
         &self,
         mut request: Request<ListFilesRequest>,
@@ -74,12 +75,13 @@ impl<S: UniversalRead<u8> + Send + Sync + 'static> StorageRead for StorageReadSe
         let auth = extract_auth(&mut request);
         let ListFilesRequest {
             collection_name,
+            shard_id,
             prefix_path,
         } = request.into_inner();
-        let base = self
-            .check_and_resolve_collection(&auth, &collection_name, "list_files")
+        let (base, collections_root) = self
+            .check_and_resolve_shard(&auth, &collection_name, shard_id, "list_files")
             .await?;
-        let prefix_path = Self::resolve_path(&base, &prefix_path)?;
+        let prefix_path = Self::resolve_path(&base, &collections_root, &prefix_path)?;
 
         let paths = tokio::task::spawn_blocking(move || S::list_files(&prefix_path))
             .await
@@ -114,12 +116,13 @@ impl<S: UniversalRead<u8> + Send + Sync + 'static> StorageRead for StorageReadSe
         let auth = extract_auth(&mut request);
         let FileLengthRequest {
             collection_name,
+            shard_id,
             path,
         } = request.into_inner();
-        let base = self
-            .check_and_resolve_collection(&auth, &collection_name, "file_length")
+        let (base, collections_root) = self
+            .check_and_resolve_shard(&auth, &collection_name, shard_id, "file_length")
             .await?;
-        let path = Self::resolve_path(&base, &path)?;
+        let path = Self::resolve_path(&base, &collections_root, &path)?;
 
         let open_options = OpenOptions::default();
         let length = tokio::task::spawn_blocking(move || {
@@ -141,24 +144,22 @@ impl<S: UniversalRead<u8> + Send + Sync + 'static> StorageRead for StorageReadSe
         let auth = extract_auth(&mut request);
         let ReadBytesRequest {
             collection_name,
+            shard_id,
             path,
             byte_offset,
             length,
         } = request.into_inner();
 
-        let base = self
-            .check_and_resolve_collection(&auth, &collection_name, "read_bytes")
+        let (base, collections_root) = self
+            .check_and_resolve_shard(&auth, &collection_name, shard_id, "read_bytes")
             .await?;
-        let path = Self::resolve_path(&base, &path)?;
+        let path = Self::resolve_path(&base, &collections_root, &path)?;
         let open_options = OpenOptions::default();
 
         let data = tokio::task::spawn_blocking(move || {
             let storage = S::open(&path, open_options).map_err(io_error_to_status)?;
             let cow = storage
-                .read::<Random>(ReadRange {
-                    byte_offset,
-                    length,
-                })
+                .read::<Random>(ReadRange::new(byte_offset, length))
                 .map_err(io_error_to_status)?;
             Ok::<_, Status>(cow.into_owned())
         })
@@ -181,20 +182,18 @@ impl<S: UniversalRead<u8> + Send + Sync + 'static> StorageRead for StorageReadSe
         let auth = extract_auth(&mut request);
         let ReadBytesStreamRequest {
             collection_name,
+            shard_id,
             path,
             byte_offset,
             length,
         } = request.into_inner();
 
-        let base = self
-            .check_and_resolve_collection(&auth, &collection_name, "read_bytes_stream")
+        let (base, collections_root) = self
+            .check_and_resolve_shard(&auth, &collection_name, shard_id, "read_bytes_stream")
             .await?;
-        let path = Self::resolve_path(&base, &path)?;
+        let path = Self::resolve_path(&base, &collections_root, &path)?;
         let open_options = OpenOptions::default();
-        let range = ReadRange {
-            byte_offset,
-            length,
-        };
+        let range = ReadRange::new(byte_offset, length);
         let (storage, range) = tokio::task::spawn_blocking(move || {
             let s = S::open(&path, open_options).map_err(io_error_to_status)?;
             let file_len = s.len().map_err(io_error_to_status)?;
@@ -218,10 +217,7 @@ impl<S: UniversalRead<u8> + Send + Sync + 'static> StorageRead for StorageReadSe
 
                 let data = tokio::task::spawn_blocking(move || {
                     storage_for_read
-                        .read::<Random>(ReadRange {
-                            byte_offset: current_offset,
-                            length: chunk_size,
-                        })
+                        .read::<Random>(ReadRange::new(current_offset, chunk_size))
                         .map(|cow| cow.into_owned())
                         .map_err(io_error_to_status)
                 })
@@ -247,12 +243,13 @@ impl<S: UniversalRead<u8> + Send + Sync + 'static> StorageRead for StorageReadSe
         let auth = extract_auth(&mut request);
         let ReadWholeRequest {
             collection_name,
+            shard_id,
             path,
         } = request.into_inner();
-        let base = self
-            .check_and_resolve_collection(&auth, &collection_name, "read_whole")
+        let (base, collections_root) = self
+            .check_and_resolve_shard(&auth, &collection_name, shard_id, "read_whole")
             .await?;
-        let path = Self::resolve_path(&base, &path)?;
+        let path = Self::resolve_path(&base, &collections_root, &path)?;
         let open_options = OpenOptions::default();
 
         let data = tokio::task::spawn_blocking(move || {
@@ -275,21 +272,19 @@ impl<S: UniversalRead<u8> + Send + Sync + 'static> StorageRead for StorageReadSe
         let auth = extract_auth(&mut request);
         let ReadBatchRequest {
             collection_name,
+            shard_id,
             path,
             ranges,
         } = request.into_inner();
-        let base = self
-            .check_and_resolve_collection(&auth, &collection_name, "read_batch")
+        let (base, collections_root) = self
+            .check_and_resolve_shard(&auth, &collection_name, shard_id, "read_batch")
             .await?;
-        let path = Self::resolve_path(&base, &path)?;
+        let path = Self::resolve_path(&base, &collections_root, &path)?;
 
         let open_options = OpenOptions::default();
         let ranges = ranges
             .iter()
-            .map(|r| ReadRange {
-                byte_offset: r.byte_offset,
-                length: r.length,
-            })
+            .map(|r| ReadRange::new(r.byte_offset, r.length))
             .collect::<Vec<_>>();
 
         let data = tokio::task::spawn_blocking(move || {
@@ -320,10 +315,11 @@ impl<S: UniversalRead<u8> + Send + Sync + 'static> StorageRead for StorageReadSe
         let auth = extract_auth(&mut request);
         let ReadMultiRequest {
             collection_name,
+            shard_id,
             reads,
         } = request.into_inner();
-        let base = self
-            .check_and_resolve_collection(&auth, &collection_name, "read_multi")
+        let (base, collections_root) = self
+            .check_and_resolve_shard(&auth, &collection_name, shard_id, "read_multi")
             .await?;
         let open_options = OpenOptions::default();
 
@@ -333,19 +329,13 @@ impl<S: UniversalRead<u8> + Send + Sync + 'static> StorageRead for StorageReadSe
         let mut reads_ = Vec::<(FileIndex, _)>::with_capacity(reads.len());
 
         for entry in &reads {
-            let resolved = Self::resolve_path(&base, &entry.path)?;
+            let resolved = Self::resolve_path(&base, &collections_root, &entry.path)?;
             let file_index = *path_to_index.entry(resolved.clone()).or_insert_with(|| {
                 let idx = unique_paths.len();
                 unique_paths.push(resolved);
                 idx
             });
-            reads_.push((
-                file_index,
-                ReadRange {
-                    byte_offset: entry.byte_offset,
-                    length: entry.length,
-                },
-            ));
+            reads_.push((file_index, ReadRange::new(entry.byte_offset, entry.length)));
         }
 
         let data = tokio::task::spawn_blocking(move || {

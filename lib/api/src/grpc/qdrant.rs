@@ -16542,7 +16542,9 @@ pub struct ListFilesRequest {
         custom(function = "common::validation::validate_collection_name_legacy")
     )]
     pub collection_name: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
+    #[prost(uint32, tag = "2")]
+    pub shard_id: u32,
+    #[prost(string, tag = "3")]
     #[validate(length(min = 1))]
     pub prefix_path: ::prost::alloc::string::String,
 }
@@ -16557,7 +16559,9 @@ pub struct FileExistsRequest {
         custom(function = "common::validation::validate_collection_name_legacy")
     )]
     pub collection_name: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
+    #[prost(uint32, tag = "2")]
+    pub shard_id: u32,
+    #[prost(string, tag = "3")]
     #[validate(length(min = 1))]
     pub path: ::prost::alloc::string::String,
 }
@@ -16586,7 +16590,9 @@ pub struct FileLengthRequest {
         custom(function = "common::validation::validate_collection_name_legacy")
     )]
     pub collection_name: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
+    #[prost(uint32, tag = "2")]
+    pub shard_id: u32,
+    #[prost(string, tag = "3")]
     #[validate(length(min = 1))]
     pub path: ::prost::alloc::string::String,
 }
@@ -16608,12 +16614,14 @@ pub struct ReadBytesRequest {
         custom(function = "common::validation::validate_collection_name_legacy")
     )]
     pub collection_name: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
+    #[prost(uint32, tag = "2")]
+    pub shard_id: u32,
+    #[prost(string, tag = "3")]
     #[validate(length(min = 1))]
     pub path: ::prost::alloc::string::String,
-    #[prost(uint64, tag = "3")]
-    pub byte_offset: u64,
     #[prost(uint64, tag = "4")]
+    pub byte_offset: u64,
+    #[prost(uint64, tag = "5")]
     pub length: u64,
 }
 #[derive(serde::Serialize)]
@@ -16634,12 +16642,14 @@ pub struct ReadBytesStreamRequest {
         custom(function = "common::validation::validate_collection_name_legacy")
     )]
     pub collection_name: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
+    #[prost(uint32, tag = "2")]
+    pub shard_id: u32,
+    #[prost(string, tag = "3")]
     #[validate(length(min = 1))]
     pub path: ::prost::alloc::string::String,
-    #[prost(uint64, tag = "3")]
-    pub byte_offset: u64,
     #[prost(uint64, tag = "4")]
+    pub byte_offset: u64,
+    #[prost(uint64, tag = "5")]
     pub length: u64,
 }
 #[derive(serde::Serialize)]
@@ -16660,7 +16670,9 @@ pub struct ReadWholeRequest {
         custom(function = "common::validation::validate_collection_name_legacy")
     )]
     pub collection_name: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
+    #[prost(uint32, tag = "2")]
+    pub shard_id: u32,
+    #[prost(string, tag = "3")]
     #[validate(length(min = 1))]
     pub path: ::prost::alloc::string::String,
 }
@@ -16692,10 +16704,12 @@ pub struct ReadBatchRequest {
         custom(function = "common::validation::validate_collection_name_legacy")
     )]
     pub collection_name: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
+    #[prost(uint32, tag = "2")]
+    pub shard_id: u32,
+    #[prost(string, tag = "3")]
     #[validate(length(min = 1))]
     pub path: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag = "3")]
+    #[prost(message, repeated, tag = "4")]
     #[validate(length(min = 1))]
     pub ranges: ::prost::alloc::vec::Vec<ReadBatchRange>,
 }
@@ -16731,7 +16745,9 @@ pub struct ReadMultiRequest {
         custom(function = "common::validation::validate_collection_name_legacy")
     )]
     pub collection_name: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag = "2")]
+    #[prost(uint32, tag = "2")]
+    pub shard_id: u32,
+    #[prost(message, repeated, tag = "3")]
     #[validate(length(min = 1), nested)]
     pub reads: ::prost::alloc::vec::Vec<ReadMultiEntry>,
 }
@@ -16747,6 +16763,18 @@ pub mod storage_read_client {
     #![allow(unused_variables, dead_code, missing_docs, clippy::let_unit_value)]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
+    /// Shard-scoped raw I/O over on-disk collection storage.
+    ///
+    /// All requests are routed to a single shard directory
+    /// (`<storage>/collections/<collection>/<shard_id>`). Replicas of the same
+    /// shard on different peers are not binary-compatible (segment IDs, WAL
+    /// positions, optimizer state all diverge), so the caller is responsible for
+    /// targeting the peer that owns the desired replica.
+    ///
+    /// This service is intended for tooling that builds synchronization on top of
+    /// Qdrant (e.g. replica bootstrap) rather than typical user queries. It is
+    /// considered internal: the request/response shape may change between
+    /// releases.
     #[derive(Debug, Clone)]
     pub struct StorageReadClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -16827,7 +16855,7 @@ pub mod storage_read_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
-        /// List files in the storage.
+        /// List files in the shard.
         pub async fn list_files(
             &mut self,
             request: impl tonic::IntoRequest<super::ListFilesRequest>,
@@ -16853,7 +16881,7 @@ pub mod storage_read_client {
                 .insert(GrpcMethod::new("qdrant.StorageRead", "ListFiles"));
             self.inner.unary(req, path, codec).await
         }
-        /// Check if a file exists in the storage.
+        /// Check if a file exists in the shard.
         pub async fn file_exists(
             &mut self,
             request: impl tonic::IntoRequest<super::FileExistsRequest>,
@@ -16879,7 +16907,7 @@ pub mod storage_read_client {
                 .insert(GrpcMethod::new("qdrant.StorageRead", "FileExists"));
             self.inner.unary(req, path, codec).await
         }
-        /// Get the length of a file in the storage.
+        /// Get the length of a file in the shard.
         pub async fn file_length(
             &mut self,
             request: impl tonic::IntoRequest<super::FileLengthRequest>,
@@ -17044,7 +17072,7 @@ pub mod storage_read_server {
     /// Generated trait containing gRPC methods that should be implemented for use with StorageReadServer.
     #[async_trait]
     pub trait StorageRead: Send + Sync + 'static {
-        /// List files in the storage.
+        /// List files in the shard.
         async fn list_files(
             &self,
             request: tonic::Request<super::ListFilesRequest>,
@@ -17052,7 +17080,7 @@ pub mod storage_read_server {
             tonic::Response<super::ListFilesResponse>,
             tonic::Status,
         >;
-        /// Check if a file exists in the storage.
+        /// Check if a file exists in the shard.
         async fn file_exists(
             &self,
             request: tonic::Request<super::FileExistsRequest>,
@@ -17060,7 +17088,7 @@ pub mod storage_read_server {
             tonic::Response<super::FileExistsResponse>,
             tonic::Status,
         >;
-        /// Get the length of a file in the storage.
+        /// Get the length of a file in the shard.
         async fn file_length(
             &self,
             request: tonic::Request<super::FileLengthRequest>,
@@ -17115,6 +17143,18 @@ pub mod storage_read_server {
             tonic::Status,
         >;
     }
+    /// Shard-scoped raw I/O over on-disk collection storage.
+    ///
+    /// All requests are routed to a single shard directory
+    /// (`<storage>/collections/<collection>/<shard_id>`). Replicas of the same
+    /// shard on different peers are not binary-compatible (segment IDs, WAL
+    /// positions, optimizer state all diverge), so the caller is responsible for
+    /// targeting the peer that owns the desired replica.
+    ///
+    /// This service is intended for tooling that builds synchronization on top of
+    /// Qdrant (e.g. replica bootstrap) rather than typical user queries. It is
+    /// considered internal: the request/response shape may change between
+    /// releases.
     #[derive(Debug)]
     pub struct StorageReadServer<T: StorageRead> {
         inner: _Inner<T>,
