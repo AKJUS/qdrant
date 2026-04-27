@@ -37,10 +37,8 @@ impl TQBits {
         match self {
             TQBits::Bits4 => 4,
             TQBits::Bits2 => 2,
-            TQBits::Bits1_5 => {
-                // TODO(turbo): Implement
-                unimplemented!()
-            }
+            // 1.5 bits is implemented as 1 bit with x1.5 dimension padding
+            TQBits::Bits1_5 => 1,
             TQBits::Bits1 => 1,
         }
     }
@@ -66,6 +64,12 @@ pub struct EncodedVectorsTQ<TStorage: EncodedStorage> {
 /// Encoded query type for Turbo Quant.
 pub struct EncodedQueryTQ {
     data: EncodedQueryTQData,
+
+    // Store the original query's l2 norm for Dot and L2 distances, where we can compute it once and reuse for all distance computations.
+    l2_norm: Option<f32>,
+
+    // Store the original query in pre-rotated form for L1 distance, where we need to dequantize vectors and apply inverse rotation to them.
+    query: Option<Vec<f32>>,
     // TODO(turbo): add precomputed extras here when needed
 }
 
@@ -252,7 +256,12 @@ impl<TStorage: EncodedStorage> EncodedVectors for EncodedVectorsTQ<TStorage> {
 
         hw_counter.vector_io_read().incr_delta(v1.len() + v2.len());
 
-        self.quantizer.score_symmetric(&v1, &v2)
+        let score = self.quantizer.score_symmetric(&v1, &v2);
+        if self.metadata.vector_parameters.invert {
+            -score
+        } else {
+            score
+        }
     }
 
     fn quantized_vector_size(&self) -> usize {
@@ -319,6 +328,11 @@ impl<TStorage: EncodedStorage> EncodedVectors for EncodedVectorsTQ<TStorage> {
         hw_counter: &HardwareCounterCell,
     ) -> f32 {
         hw_counter.cpu_counter().incr_delta(bytes.len());
-        self.quantizer.score_precomputed(query, bytes)
+        let score = self.quantizer.score_precomputed(query, bytes);
+        if self.metadata.vector_parameters.invert {
+            -score
+        } else {
+            score
+        }
     }
 }

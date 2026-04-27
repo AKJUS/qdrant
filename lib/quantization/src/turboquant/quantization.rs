@@ -56,8 +56,6 @@ impl TurboQuantizer {
 
     /// Quantize a given vector with TurboQuant.
     pub fn quantize(&self, vec: &[f32], buf: &mut [f64]) -> Vec<u8> {
-        Self::assert_supported_distance(self.distance);
-
         debug_assert!(vec.len() <= self.padded_dim);
         debug_assert_eq!(buf.len(), self.padded_dim);
 
@@ -85,6 +83,13 @@ impl TurboQuantizer {
         self.pack_vector(buf.iter().map(|&val| val * scale), extras)
     }
 
+    pub fn dequantize(&self, quantized: &[u8]) -> Vec<f64> {
+        let (extras, unpacked) = self.unpack_vector(quantized);
+        let length = f64::from(extras.l2_length.unwrap_or(1.0));
+        let scale = length / (self.padded_dim as f64).sqrt();
+        unpacked.map(|x| x * scale).collect()
+    }
+
     /// Similarity score between two vectors that were both encoded with this
     /// quantizer. Returns an approximate `<v1, v2>` for Dot and `cos(θ)` for
     /// Cosine.
@@ -99,9 +104,29 @@ impl TurboQuantizer {
         let v1_l2 = extra_v1.l2_length.unwrap_or(1.0);
         let v2_l2 = extra_v2.l2_length.unwrap_or(1.0);
 
-        // Both sides were scaled by sqrt(dim)/||v|| during quantize; restore
-        // magnitudes with l2, undo the sqrt(dim)² = dim inflation.
-        raw_dot * v1_l2 * v2_l2 / self.padded_dim as f32
+        match self.distance {
+            DistanceType::Cosine | DistanceType::Dot => {
+                raw_dot * v1_l2 * v2_l2 / self.padded_dim as f32
+            }
+            DistanceType::L2 => {
+                // For L2, the "dot" we calculated is actually ||v1||² + ||v2||² - 2*||v1||*||v2||*<v1_normalized, v2_normalized>>,
+                // so we need to do some extra math to recover the actual <v1, v2>.
+                v1_l2 * v1_l2 + v2_l2 * v2_l2
+                    - 2.0 * v1_l2 * v2_l2 * raw_dot / self.padded_dim as f32
+            }
+            DistanceType::L1 => {
+                // Fallback case for L1, where we need to fully dequantize both vectors.
+                let mut deq_v1: Vec<f64> = self.dequantize(v1);
+                self.rotation.apply_inverse(deq_v1.as_mut_slice());
+                let mut deq_v2: Vec<f64> = self.dequantize(v2);
+                self.rotation.apply_inverse(deq_v2.as_mut_slice());
+                deq_v1
+                    .iter()
+                    .zip(deq_v2.iter())
+                    .map(|(&x, &y)| (x - y).abs() as f32)
+                    .sum()
+            }
+        }
     }
 
     /// Precompute the Hadamard rotation of `query` so subsequent
@@ -117,8 +142,23 @@ impl TurboQuantizer {
             .collect();
 
         self.rotation.apply(&mut rotated);
+
+        let l2_norm = match self.distance {
+            DistanceType::L1 | DistanceType::L2 | DistanceType::Dot => {
+                Some(rotated.iter().map(|&i| i * i).sum::<f64>().sqrt() as f32)
+            }
+            DistanceType::Cosine => None,
+        };
+
+        let query = match self.distance {
+            DistanceType::L1 => Some(query.to_vec()),
+            DistanceType::Cosine | DistanceType::Dot | DistanceType::L2 => None,
+        };
+
         EncodedQueryTQ {
             data: EncodedQueryTQData::Native(Precomputed(rotated)),
+            l2_norm,
+            query,
         }
     }
 
@@ -133,11 +173,36 @@ impl TurboQuantizer {
             } // TODO(turbo): add other variants for SIMD-optimized precomputations, etc.
         };
 
-        let l2 = vector_extras.l2_length.unwrap_or(1.0);
-
-        // Only the stored vector carries the sqrt(dim)/||v|| scaling, so we
-        // compensate by multiplying by ||v|| and dividing by sqrt(dim).
-        dot * l2 / self.dim_sqrt
+        match self.distance {
+            DistanceType::Cosine => {
+                // Only the stored vector carries the sqrt(dim)/||v|| scaling, so we
+                // compensate by multiplying by ||v|| and dividing by sqrt(dim).
+                dot / self.dim_sqrt
+            }
+            DistanceType::Dot => {
+                let l2 = vector_extras.l2_length.unwrap_or(1.0);
+                dot * l2 / self.dim_sqrt
+            }
+            DistanceType::L2 => {
+                let l2 = vector_extras.l2_length.unwrap_or(1.0);
+                // For L2, the "dot" we calculated is actually ||query||² + ||v||² - 2*||v||²*<query, v_normalized>>,
+                // so we need to do some extra math to recover the actual <query, v>.
+                let query_l2 = query.l2_norm.unwrap_or(1.0);
+                query_l2 * query_l2 + l2 * l2 - 2.0 * l2 * dot / self.dim_sqrt
+            }
+            DistanceType::L1 => {
+                let mut deq_v: Vec<f64> = self.dequantize(vec);
+                self.rotation.apply_inverse(deq_v.as_mut_slice());
+                query
+                    .query
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .zip(deq_v.iter())
+                    .map(|(&q, &v)| (f64::from(q) - v).abs() as f32)
+                    .sum()
+            }
+        }
     }
 }
 
