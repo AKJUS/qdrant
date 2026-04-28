@@ -207,7 +207,7 @@ impl ShardOperation for LocalShard {
                     hw_measurement_acc,
                     DeferredBehavior::Exclude,
                 )
-                .await?
+                .await
             }
             Some(order_by) => {
                 self.internal_scroll_by_field(
@@ -221,7 +221,7 @@ impl ShardOperation for LocalShard {
                     hw_measurement_acc,
                     DeferredBehavior::Exclude,
                 )
-                .await?
+                .await
             }
         };
 
@@ -233,7 +233,7 @@ impl ShardOperation for LocalShard {
             None
         };
         log_request_to_collector(&self.collection_name, elapsed, cpu_usage_ratio, || request);
-        Ok(result)
+        result
     }
 
     async fn local_scroll_by_id(
@@ -304,9 +304,9 @@ impl ShardOperation for LocalShard {
         })?;
         let start_time = Instant::now();
         let cpu_utilization = hw_measurement_acc.cpu_utilization();
-        let total_count = if request.exact {
+        let result: CollectionResult<usize> = if request.exact {
             let timeout = self.timeout_or_default_search_timeout(timeout);
-            let all_points = tokio::time::timeout(
+            match tokio::time::timeout(
                 timeout,
                 self.read_filtered(
                     request.filter.as_ref(),
@@ -317,12 +317,15 @@ impl ShardOperation for LocalShard {
                 ),
             )
             .await
-            .map_err(|_: Elapsed| CollectionError::timeout(timeout, "count"))??;
-            all_points.len()
+            {
+                Ok(Ok(all_points)) => Ok(all_points.len()),
+                Ok(Err(err)) => Err(err),
+                Err(_elapsed) => Err(CollectionError::timeout(timeout, "count")),
+            }
         } else {
             self.estimate_cardinality(request.filter.as_ref(), &hw_measurement_acc)
-                .await?
-                .exp
+                .await
+                .map(|cardinality| cardinality.exp)
         };
         let elapsed = start_time.elapsed();
         let cpu_ratio = cpu_utilization.ratio();
@@ -332,7 +335,7 @@ impl ShardOperation for LocalShard {
             None
         };
         log_request_to_collector(&self.collection_name, elapsed, cpu_usage_ratio, || request);
-        Ok(CountResult { count: total_count })
+        result.map(|total_count| CountResult { count: total_count })
     }
 
     /// This call is rate limited by the read rate limiter.
@@ -352,7 +355,7 @@ impl ShardOperation for LocalShard {
 
         let start_time = Instant::now();
         let cpu_utilization = hw_measurement_acc.cpu_utilization();
-        let records_map = tokio::time::timeout(
+        let result = match tokio::time::timeout(
             timeout,
             SegmentsSearcher::retrieve(
                 self.segments.clone(),
@@ -366,13 +369,19 @@ impl ShardOperation for LocalShard {
             ),
         )
         .await
-        .map_err(|_: Elapsed| CollectionError::timeout(timeout, "retrieve"))??;
+        {
+            Ok(Ok(records_map)) => {
+                let ordered_records = request
+                    .ids
+                    .iter()
+                    .filter_map(|point| records_map.get(point).cloned())
+                    .collect();
 
-        let ordered_records = request
-            .ids
-            .iter()
-            .filter_map(|point| records_map.get(point).cloned())
-            .collect();
+                Ok(ordered_records)
+            }
+            Ok(Err(err)) => Err(err),
+            Err(_elapsed) => Err(CollectionError::timeout(timeout, "retrieve")),
+        };
 
         let elapsed = start_time.elapsed();
         let cpu_ratio = cpu_utilization.ratio();
@@ -383,7 +392,7 @@ impl ShardOperation for LocalShard {
         };
         log_request_to_collector(&self.collection_name, elapsed, cpu_usage_ratio, || request);
 
-        Ok(ordered_records)
+        result
     }
 
     /// This call is rate limited by the read rate limiter.
@@ -451,14 +460,14 @@ impl ShardOperation for LocalShard {
         let start_time = Instant::now();
         let timeout = self.timeout_or_default_search_timeout(timeout);
         let cpu_utilization = hw_measurement_acc.cpu_utilization();
-        let hits = if request.exact {
+        let result = if request.exact {
             self.exact_facet(
                 request.clone(),
                 search_runtime_handle,
                 timeout,
                 hw_measurement_acc,
             )
-            .await?
+            .await
         } else {
             self.approx_facet(
                 request.clone(),
@@ -466,7 +475,7 @@ impl ShardOperation for LocalShard {
                 timeout,
                 hw_measurement_acc,
             )
-            .await?
+            .await
         };
         let elapsed = start_time.elapsed();
         let cpu_ratio = cpu_utilization.ratio();
@@ -476,7 +485,7 @@ impl ShardOperation for LocalShard {
             None
         };
         log_request_to_collector(&self.collection_name, elapsed, cpu_usage_ratio, || request);
-        Ok(FacetResponse { hits })
+        result.map(|hits| FacetResponse { hits })
     }
 
     /// Finishes ongoing update tasks
