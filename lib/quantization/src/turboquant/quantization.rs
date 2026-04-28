@@ -1,5 +1,9 @@
 use crate::DistanceType;
 use crate::turboquant::rotation::HadamardRotation;
+use crate::turboquant::simd::{
+    Query1bitSimd, Query2bitSimd, Query4bitSimd, score_1bit_internal, score_2bit_internal,
+    score_4bit_internal,
+};
 use crate::turboquant::{EncodedQueryTQ, EncodedQueryTQData, Metadata, TQBits, TQMode};
 
 /// Quantize vectors using TurboQuant.
@@ -12,20 +16,6 @@ pub struct TurboQuantizer {
 
     // Pre-calculated `sqrt(dim)` used in scoring.
     dim_sqrt: f32,
-}
-
-/// A query with the Hadamard rotation already applied. Built via
-/// [`TurboQuantizer::precompute_query`] and consumed by
-/// [`TurboQuantizer::score_precomputed`] to amortize the rotation cost across
-/// many scoring calls.
-pub struct Precomputed(Vec<f64>);
-
-impl Precomputed {
-    /// Borrow the rotated query components.
-    #[inline]
-    pub fn as_slice(&self) -> &[f64] {
-        &self.0
-    }
 }
 
 impl TurboQuantizer {
@@ -97,9 +87,19 @@ impl TurboQuantizer {
     /// For asymmetric scoring (original vector against quantized vector), refer to [`Self::score_precomputed`]
     /// and precompute the query first.
     pub fn score_symmetric(&self, v1: &[u8], v2: &[u8]) -> f32 {
-        let (extra_v1, iter1) = self.unpack_vector(v1);
-        let (extra_v2, iter2) = self.unpack_vector(v2);
-        let raw_dot = dot_impl(iter1, iter2);
+        let (extra_v1, data_v1) = self.split_vector(v1);
+        let (extra_v2, data_v2) = self.split_vector(v2);
+
+        // `score_{N}bit_internal` computes `Σ centroid(a_k) · centroid(b_k)`
+        // directly on packed bytes — same quantity the old
+        // `dot_impl(unpack_vector, unpack_vector)` f64 path produced, now via
+        // the bit-width's SIMD kernel (with a scalar fallback built in).
+        let raw_dot = match self.bits {
+            TQBits::Bits1 => score_1bit_internal(data_v1, data_v2),
+            TQBits::Bits1_5 => score_1bit_internal(data_v1, data_v2),
+            TQBits::Bits2 => score_2bit_internal(data_v1, data_v2),
+            TQBits::Bits4 => score_4bit_internal(data_v1, data_v2),
+        };
 
         let v1_l2 = extra_v1.l2_length.unwrap_or(1.0);
         let v2_l2 = extra_v2.l2_length.unwrap_or(1.0);
@@ -129,8 +129,9 @@ impl TurboQuantizer {
         }
     }
 
-    /// Precompute the Hadamard rotation of `query` so subsequent
-    /// [`Self::score_precomputed`] calls skip the per-call rotation.
+    /// Precompute the Hadamard rotation of `query` and hand it to the
+    /// bit-width's SIMD encoder.  Subsequent [`Self::score_precomputed`]
+    /// calls reuse this precomputation — rotation runs once, not per score.
     pub fn precompute_query(&self, query: &[f32]) -> EncodedQueryTQ {
         debug_assert!(query.len() <= self.padded_dim);
 
@@ -140,7 +141,6 @@ impl TurboQuantizer {
             .chain(std::iter::repeat(0.0))
             .take(self.padded_dim)
             .collect();
-
         self.rotation.apply(&mut rotated);
 
         let l2_norm = match self.distance {
@@ -155,8 +155,19 @@ impl TurboQuantizer {
             DistanceType::Cosine | DistanceType::Dot | DistanceType::L2 => None,
         };
 
+        // SIMD encoders consume f32 (the quantization step will re-bucket into
+        // integer codebooks anyway, so the extra f64 precision from rotation
+        // has no downstream benefit here).
+        let rotated_f32: Vec<f32> = rotated.iter().map(|&x| x as f32).collect();
+
+        let data = match self.bits {
+            TQBits::Bits1 => EncodedQueryTQData::Bits1(Query1bitSimd::new(&rotated_f32)),
+            TQBits::Bits1_5 => EncodedQueryTQData::Bits1(Query1bitSimd::new(&rotated_f32)),
+            TQBits::Bits2 => EncodedQueryTQData::Bits2(Query2bitSimd::new(&rotated_f32)),
+            TQBits::Bits4 => EncodedQueryTQData::Bits4(Query4bitSimd::new(&rotated_f32)),
+        };
         EncodedQueryTQ {
-            data: EncodedQueryTQData::Native(Precomputed(rotated)),
+            data,
             l2_norm,
             query,
         }
@@ -166,11 +177,11 @@ impl TurboQuantizer {
     /// [`Self::precompute_query`]. Returns an approximate `<query, v>` for Dot
     /// and `cos(θ)` for Cosine.
     pub fn score_precomputed(&self, query: &EncodedQueryTQ, vec: &[u8]) -> f32 {
-        let (vector_extras, unpacked) = self.unpack_vector(vec);
+        let (vector_extras, data_bytes) = self.split_vector(vec);
         let dot = match &query.data {
-            EncodedQueryTQData::Native(precomputed) => {
-                dot_impl(precomputed.as_slice().iter().copied(), unpacked)
-            } // TODO(turbo): add other variants for SIMD-optimized precomputations, etc.
+            EncodedQueryTQData::Bits1(q) => q.dotprod(data_bytes),
+            EncodedQueryTQData::Bits2(q) => q.dotprod(data_bytes),
+            EncodedQueryTQData::Bits4(q) => q.dotprod(data_bytes),
         };
 
         match self.distance {
@@ -204,16 +215,6 @@ impl TurboQuantizer {
             }
         }
     }
-}
-
-/// Raw dot implementation between two vectors, `left` and `right`.
-#[inline]
-fn dot_impl<I, J>(left: I, right: J) -> f32
-where
-    I: Iterator<Item = f64>,
-    J: Iterator<Item = f64>,
-{
-    left.zip(right).map(|(q, u)| q * u).sum::<f64>() as f32
 }
 
 #[cfg(test)]
@@ -839,6 +840,66 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Sanity-check that [`TurboQuantizer::precompute_query`] +
+    /// [`TurboQuantizer::score_precomputed`] dispatch works for every
+    /// supported bit width.  The precision-oriented tests above lock
+    /// `TQBits::Bits4`, so the `EncodedQueryTQData::Bits1`/`Bits2` dispatch
+    /// arms (and the Query1bitSimd / Query2bitSimd wiring behind them) would
+    /// otherwise only be exercised by each kernel's own module-level parity
+    /// tests, never through the integrated `precompute_query` path.
+    ///
+    /// The checks here are deliberately loose — 1-bit scoring discards almost
+    /// all amplitude info so tight `|got − truth| < ε` asserts would be
+    /// meaningless.  We require: finite output, self-similarity positive,
+    /// antipodal negative, and a non-trivial gap between the two.
+    #[rstest::rstest]
+    #[case::bits1(TQBits::Bits1)]
+    #[case::bits2(TQBits::Bits2)]
+    #[case::bits4(TQBits::Bits4)]
+    fn score_precomputed_dispatches_all_bit_widths(#[case] bits: TQBits) {
+        let dim = 512;
+
+        for &distance in &[DistanceType::Dot, DistanceType::Cosine] {
+            let mut rng = StdRng::seed_from_u64(0xD15_DA7C4); // same across distances → stable
+            let tq = make_tq(dim, bits, distance);
+            let mut buf = vec![0.0f64; tq.padded_dim];
+
+            let raw = random_vector(dim, &mut rng);
+            let v = match distance {
+                DistanceType::Cosine => normalize_vector(&raw),
+                _ => raw,
+            };
+            let neg_v: Vec<f32> = v.iter().map(|&x| -x).collect();
+
+            let v_q = tq.quantize(&v, &mut buf);
+            let neg_q = tq.quantize(&neg_v, &mut buf);
+
+            let self_score = asymmetric_score_helper(&tq, &v, &v_q);
+            let anti_score = asymmetric_score_helper(&tq, &v, &neg_q);
+
+            assert!(
+                self_score.is_finite() && anti_score.is_finite(),
+                "non-finite score for {bits:?}/{distance:?}: self={self_score}, anti={anti_score}",
+            );
+            assert!(
+                self_score > 0.0,
+                "self-similarity should be positive for {bits:?}/{distance:?}, got {self_score}",
+            );
+            assert!(
+                anti_score < 0.0,
+                "antipodal score should be negative for {bits:?}/{distance:?}, got {anti_score}",
+            );
+            // Gap must be large relative to the score magnitudes — guards
+            // against a constant-output or sign-swapped dispatch bug.
+            let gap = self_score - anti_score;
+            let ref_mag = self_score.abs().max(anti_score.abs());
+            assert!(
+                gap > ref_mag,
+                "score spread too small for {bits:?}/{distance:?}: self={self_score}, anti={anti_score}",
+            );
         }
     }
 }
