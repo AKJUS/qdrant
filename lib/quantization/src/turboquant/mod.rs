@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::EncodingError;
 use crate::encoded_storage::{EncodedStorage, EncodedStorageBuilder};
 use crate::encoded_vectors::{EncodedVectors, VectorParameters, validate_vector_parameters};
-use crate::turboquant::quantization::TurboQuantizer;
+use crate::turboquant::quantization::{ErrorCorrection, TurboQuantizer};
 use crate::turboquant::simd::{Query1bitSimd, Query2bitSimd, Query4bitSimd};
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -65,6 +65,11 @@ pub struct EncodedVectorsTQ<TStorage: EncodedStorage> {
 
 /// Encoded query type for Turbo Quant.
 pub struct EncodedQueryTQ {
+    /// SIMD-encoded query for the asymmetric scoring path. For TQ+, the
+    /// rotated query is pre-multiplied by `D' = 1/scale` per coord so the
+    /// SIMD raw_dot computes `⟨Q · D', X+⟩` directly — the asymmetric score
+    /// formulas then just add `ec_correction` and apply renorm's
+    /// `scaling_factor`, identical to the Normal-mode path.
     data: EncodedQueryTQData,
 
     // Store the original query's l2 norm for Dot and L2 distances, where we can compute it once and reuse for all distance computations.
@@ -72,7 +77,11 @@ pub struct EncodedQueryTQ {
 
     // Store the original query in pre-rotated form for L1 distance, where we need to dequantize vectors and apply inverse rotation to them.
     query: Option<Vec<f32>>,
-    // TODO(turbo): add precomputed extras here when needed
+
+    /// TQ+ asymmetric-scoring scalar correction `qm = ⟨Q, M⟩ = -⟨rotated_q, shift⟩`.
+    /// `0.0` when EC is not configured. Added to the SIMD raw_dot so the
+    /// existing score formulas stay unchanged.
+    ec_correction: f32,
 }
 
 /// SIMD-ready encoded query, one variant per supported bit-width.  Each
@@ -80,8 +89,16 @@ pub struct EncodedQueryTQ {
 /// (rotation-applied query, quantized to the SIMD-friendly integer form);
 /// on architectures without a matching SIMD instruction set the scalar
 /// reference kernel inside each type takes over automatically.
+///
+/// `Bits1Wide` is the same kernel as `Bits1` but with 16-bit query
+/// quantization instead of the default 8-bit (the kernel's max). Used in
+/// TQ+ for 1-bit storage: the per-coord `D'` pre-scaling pushes some query
+/// coords into the bottom of the 8-bit integer range, where rounding noise
+/// is large relative to the signal — 16 bits gives the most headroom the
+/// existing kernel supports.
 pub enum EncodedQueryTQData {
     Bits1(Query1bitSimd),
+    Bits1Wide(Query1bitSimd<16>),
     Bits2(Query2bitSimd),
     Bits4(Query4bitSimd),
 }
@@ -91,6 +108,16 @@ pub struct Metadata {
     pub vector_parameters: VectorParameters,
     pub bits: TQBits,
     pub mode: TQMode,
+    pub error_correction: Option<ErrorCorrectionMetadata>,
+}
+
+/// On-disk form of TQ+'s [`ErrorCorrection`]. Stores only `shift` and `scale`
+/// — derived caches like `D'_i²` and `⟨M, M⟩` are recomputed at load time so
+/// `shift` / `scale` remain the single source of truth.
+#[derive(Serialize, Deserialize)]
+pub struct ErrorCorrectionMetadata {
+    pub shift: Vec<f32>,
+    pub scale: Vec<f32>,
 }
 
 impl<TStorage: EncodedStorage> EncodedVectorsTQ<TStorage> {
@@ -122,13 +149,72 @@ impl<TStorage: EncodedStorage> EncodedVectorsTQ<TStorage> {
     ) -> Result<Self, EncodingError> {
         debug_assert!(validate_vector_parameters(data.clone(), vector_parameters).is_ok());
 
+        // TQ+: first pass over `data` to fit per-coordinate shift/scale that
+        // pulls the rotated, length-rescaled coordinates onto the Lloyd-Max
+        // N(0, 1) codebook before quantization.
+        //
+        // Shift uses per-coordinate mean. Median is more robust on skewed
+        // distributions and is a recall improvement worth landing — but
+        // separately. This first PR is the mean-based form so the diff stays
+        // focused on the rest of the integration.
+        let error_correction = match mode {
+            TQMode::Normal => None,
+            TQMode::Plus => {
+                let pre_quantizer = TurboQuantizer::new_from_metadata(&Metadata {
+                    vector_parameters: *vector_parameters,
+                    bits,
+                    mode,
+                    error_correction: None,
+                })
+                .map_err(|e| {
+                    EncodingError::EncodingError(format!(
+                        "Failed to construct pre-quantizer for TQ+ stats pass: {e}",
+                    ))
+                })?;
+                let padded_dim = pre_quantizer.padded_dim;
+                let mut buf = vec![0.0f64; padded_dim];
+                let mut stats_builder = crate::vector_stats::VectorStatsBuilder::new(padded_dim);
+                for vector in data.clone() {
+                    if stopped.load(Ordering::Relaxed) {
+                        return Err(EncodingError::Stopped);
+                    }
+                    pre_quantizer.preprocess_into(vector.as_ref(), &mut buf);
+                    stats_builder.add(buf.as_slice());
+                }
+                let stats = stats_builder.build();
+
+                let mut shift = vec![0.0f32; padded_dim];
+                let mut scale = vec![1.0f32; padded_dim];
+                for (i, s) in stats.elements_stats.iter().enumerate() {
+                    // Always recenter — even constant-but-biased coordinates
+                    // benefit from `shift = -mean` (so the codebook sees them
+                    // at 0). Only the variance reciprocal needs the EPSILON
+                    // guard against division blow-up on truly zero-variance
+                    // coords.
+                    shift[i] = -s.mean;
+                    if s.stddev > f32::EPSILON {
+                        scale[i] = s.stddev.recip();
+                    }
+                }
+                Some(ErrorCorrection::new(shift, scale))
+            }
+        };
+
         let metadata = Metadata {
             vector_parameters: *vector_parameters,
             bits,
             mode,
+            error_correction: error_correction.as_ref().map(|ec| ErrorCorrectionMetadata {
+                shift: ec.shift.clone(),
+                scale: ec.scale.clone(),
+            }),
         };
 
-        let quantizer = TurboQuantizer::new_from_metadata(&metadata);
+        let quantizer = TurboQuantizer::new_from_metadata(&metadata).map_err(|e| {
+            EncodingError::EncodingError(format!(
+                "Failed to construct quantizer from metadata: {e}",
+            ))
+        })?;
         let mut buf = vec![0.0f64; quantizer.padded_dim];
 
         for vector in data {
@@ -183,7 +269,7 @@ impl<TStorage: EncodedStorage> EncodedVectorsTQ<TStorage> {
         let contents = fs::read_to_string(meta_path)?;
         let metadata: Metadata = serde_json::from_str(&contents)?;
 
-        let quantizer = TurboQuantizer::new_from_metadata(&metadata);
+        let quantizer = TurboQuantizer::new_from_metadata(&metadata)?;
 
         let result = Self {
             encoded_vectors,
