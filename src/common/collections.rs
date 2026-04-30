@@ -25,7 +25,9 @@ use collection::shards::replica_set;
 use collection::shards::replica_set::replica_set_state;
 use collection::shards::resharding::ReshardKey;
 use collection::shards::shard::{PeerId, ShardId, ShardsPlacement};
-use collection::shards::transfer::{ShardTransfer, ShardTransferKey, ShardTransferRestart};
+use collection::shards::transfer::{
+    ShardTransfer, ShardTransferKey, ShardTransferMethod, ShardTransferRestart,
+};
 use itertools::Itertools;
 use rand::prelude::SliceRandom;
 use rand::seq::IteratorRandom;
@@ -310,6 +312,13 @@ pub async fn do_update_collection_cluster(
             validate_peer_exists(move_shard.to_peer_id)?;
             validate_peer_exists(move_shard.from_peer_id)?;
 
+            // Resolve the transfer method on this peer so the whole cluster
+            // applies the same one — the consensus entry carries it explicitly.
+            let method = match move_shard.method {
+                Some(method) => method,
+                None => collection.default_shard_transfer_method(),
+            };
+
             // submit operation to consensus
             dispatcher
                 .submit_collection_meta_op(
@@ -321,7 +330,7 @@ pub async fn do_update_collection_cluster(
                             to: move_shard.to_peer_id,
                             from: move_shard.from_peer_id,
                             sync: false,
-                            method: move_shard.method,
+                            method: Some(method),
                             filter: None,
                         }),
                     ),
@@ -345,6 +354,13 @@ pub async fn do_update_collection_cluster(
             // validate source peer exists
             validate_peer_exists(replicate_shard.from_peer_id)?;
 
+            // Resolve the transfer method on this peer so the whole cluster
+            // applies the same one — the consensus entry carries it explicitly.
+            let method = match replicate_shard.method {
+                Some(method) => method,
+                None => collection.default_shard_transfer_method(),
+            };
+
             // submit operation to consensus
             dispatcher
                 .submit_collection_meta_op(
@@ -356,7 +372,7 @@ pub async fn do_update_collection_cluster(
                             to: replicate_shard.to_peer_id,
                             from: replicate_shard.from_peer_id,
                             sync: true,
-                            method: replicate_shard.method,
+                            method: Some(method),
                             filter: None,
                         }),
                     ),
@@ -402,13 +418,12 @@ pub async fn do_update_collection_cluster(
             validate_peer_exists(to_peer_id)?;
             validate_peer_exists(from_peer_id)?;
 
-            // Decide on a transfer-method and check its validity in combination with filters.
-            let method = collection.default_shard_transfer_method().await;
-            if !method.is_streaming() && filter.is_some() {
-                return Err(StorageError::bad_request(format!(
-                    "Can't do shard transfer using method {method:?} in combination with a filter",
-                )));
-            }
+            // Require stream records based transfer if a filter is given
+            let method = if filter.is_none() {
+                collection.default_shard_transfer_method()
+            } else {
+                ShardTransferMethod::StreamRecords
+            };
 
             // submit operation to consensus
             dispatcher
