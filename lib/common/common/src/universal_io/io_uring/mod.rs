@@ -50,7 +50,7 @@ impl UniversalReadFileOps for IoUringFile {
 }
 
 impl<T: bytemuck::Pod + 'static> UniversalRead<T> for IoUringFile {
-    type ReadPipeline<'a, P: AccessPattern, Meta> = IoUringPipeline<'a, T, Meta>;
+    type ReadPipeline<'a, Meta> = IoUringPipeline<'a, T, Meta>;
 
     fn open(path: impl AsRef<Path>, options: OpenOptions) -> Result<Self> {
         // Check that io_uring is supported on this system.
@@ -134,9 +134,11 @@ pub struct IoUringPipeline<'a, T: bytemuck::Pod, Meta> {
     runtime: IoUringRuntime<'a, T, Meta>,
 }
 
-impl<'a, T: bytemuck::Pod, Meta> UniversalReadPipeline<'a, T, IoUringFile, Meta>
+impl<'a, T: bytemuck::Pod, Meta> UniversalReadPipeline<'a, T, Meta>
     for IoUringPipeline<'a, T, Meta>
 {
+    type File = IoUringFile;
+
     fn new() -> Result<Self> {
         Ok(Self {
             runtime: IoUringRuntime::new()?,
@@ -148,7 +150,10 @@ impl<'a, T: bytemuck::Pod, Meta> UniversalReadPipeline<'a, T, IoUringFile, Meta>
         self.runtime.in_progress + squeue.len() < IO_URING_QUEUE_LENGTH as _
     }
 
-    fn schedule(&mut self, meta: Meta, file: &'a IoUringFile, range: ReadRange) -> Result<()> {
+    fn schedule<P>(&mut self, meta: Meta, file: &'a IoUringFile, range: ReadRange) -> Result<()>
+    where
+        P: AccessPattern,
+    {
         let mut squeue = self.runtime.io_uring.submission();
         if self.runtime.in_progress + squeue.len() >= IO_URING_QUEUE_LENGTH as _ {
             return Err(UniversalIoError::QueueIsFull);

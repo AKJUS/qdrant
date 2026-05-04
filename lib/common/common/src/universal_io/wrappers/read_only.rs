@@ -33,8 +33,8 @@ where
     S: UniversalRead<T>,
     T: Copy + 'static,
 {
-    type ReadPipeline<'a, P: AccessPattern, Meta>
-        = WrappedReadPipeline<'a, T, S, P, Meta>
+    type ReadPipeline<'a, Meta>
+        = WrappedReadPipeline<'a, Self, S::ReadPipeline<'a, Meta>>
     where
         Self: 'a;
 

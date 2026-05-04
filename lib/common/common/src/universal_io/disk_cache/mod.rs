@@ -67,7 +67,7 @@ impl<T> UniversalReadFileOps for CachedSlice<T> {
 }
 
 impl<T: bytemuck::Pod> UniversalRead<T> for CachedSlice<T> {
-    type ReadPipeline<'a, P: AccessPattern, Meta>
+    type ReadPipeline<'a, Meta>
         = DiskCacheReadPipeline<'a, T, Meta>
     where
         Self: 'a;
@@ -126,9 +126,11 @@ pub struct DiskCacheReadPipeline<'a, T: bytemuck::Pod, Meta> {
     result: Option<(Meta, Cow<'a, [T]>)>,
 }
 
-impl<'a, T: bytemuck::Pod, Meta> UniversalReadPipeline<'a, T, CachedSlice<T>, Meta>
+impl<'a, T: bytemuck::Pod, Meta> UniversalReadPipeline<'a, T, Meta>
     for DiskCacheReadPipeline<'a, T, Meta>
 {
+    type File = CachedSlice<T>;
+
     fn new() -> Result<Self> {
         Ok(Self { result: None })
     }
@@ -137,7 +139,10 @@ impl<'a, T: bytemuck::Pod, Meta> UniversalReadPipeline<'a, T, CachedSlice<T>, Me
         self.result.is_none()
     }
 
-    fn schedule(&mut self, meta: Meta, file: &'a CachedSlice<T>, range: ReadRange) -> Result<()> {
+    fn schedule<P>(&mut self, meta: Meta, file: &'a CachedSlice<T>, range: ReadRange) -> Result<()>
+    where
+        P: AccessPattern,
+    {
         if self.result.is_some() {
             return Err(UniversalIoError::QueueIsFull);
         }

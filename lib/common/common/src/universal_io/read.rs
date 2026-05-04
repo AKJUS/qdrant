@@ -9,7 +9,7 @@ use crate::universal_io::file_ops::UniversalReadFileOps;
 /// implementations, such as memory map, io_uring, DIRECTIO, S3, etc.
 #[expect(clippy::len_without_is_empty)]
 pub trait UniversalRead<T: Copy + 'static>: UniversalReadFileOps {
-    type ReadPipeline<'a, P: AccessPattern, Meta>: UniversalReadPipeline<'a, T, Self, Meta>
+    type ReadPipeline<'a, Meta>: UniversalReadPipeline<'a, T, Meta, File = Self>
     where
         Self: 'a;
 
@@ -89,14 +89,14 @@ pub trait UniversalRead<T: Copy + 'static>: UniversalReadFileOps {
     where
         Self: 'a,
     {
-        let mut pipeline = Self::ReadPipeline::<'a, P, Meta>::new()?;
+        let mut pipeline = Self::ReadPipeline::<'a, Meta>::new()?;
         let mut reads = reads.into_iter();
         let iter = std::iter::from_fn(move || {
             while pipeline.can_schedule()
                 && let Some(read) = reads.next()
             {
                 let (meta, file, range) = read;
-                if let Err(err) = pipeline.schedule(meta, file, range) {
+                if let Err(err) = pipeline.schedule::<P>(meta, file, range) {
                     return Some(Err(err));
                 }
             }
@@ -110,7 +110,9 @@ pub trait UniversalRead<T: Copy + 'static>: UniversalReadFileOps {
     // When adding provided methods, don't forget to update impls in crate::universal_io::wrappers::*.
 }
 
-pub trait UniversalReadPipeline<'a, T: Copy + 'static, S, Meta>: Sized {
+pub trait UniversalReadPipeline<'a, T: Copy + 'static, Meta>: Sized {
+    type File: 'a;
+
     fn new() -> Result<Self>;
 
     fn can_schedule(&mut self) -> bool;
@@ -122,7 +124,9 @@ pub trait UniversalReadPipeline<'a, T: Copy + 'static, S, Meta>: Sized {
     ///
     /// Should be called only when [`UniversalReadPipeline::can_schedule()`] is
     /// `true`. Returns [`UniversalIoError::QueueIsFull`] otherwise.
-    fn schedule(&mut self, meta: Meta, file: &'a S, range: ReadRange) -> Result<()>;
+    fn schedule<P>(&mut self, meta: Meta, file: &'a Self::File, range: ReadRange) -> Result<()>
+    where
+        P: AccessPattern;
 
     /// Block until any of the scheduled operations is completed and consume its
     /// result.
