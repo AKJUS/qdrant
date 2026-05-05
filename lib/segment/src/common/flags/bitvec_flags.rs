@@ -2,11 +2,11 @@ use std::path::PathBuf;
 
 use common::bitvec::{BitSlice, BitVec};
 use common::types::PointOffsetType;
-use common::universal_io::MmapFile;
 
 use super::buffered_dynamic_flags::BufferedDynamicFlags;
 use super::dynamic_stored_flags::DynamicStoredFlags;
 use crate::common::Flusher;
+use crate::common::flags::dynamic_stored_flags::UioDynamicFlags;
 use crate::common::operation_error::OperationResult;
 
 /// A buffered, growable, and persistent bitslice with a separate in-memory bitvec.
@@ -17,9 +17,9 @@ use crate::common::operation_error::OperationResult;
 ///
 /// [1]: super::roaring_flags::RoaringFlags
 #[derive(Debug)]
-pub struct BitvecFlags {
+pub struct BitvecFlags<S> {
     /// Buffered persisted flags.
-    storage: BufferedDynamicFlags,
+    storage: BufferedDynamicFlags<S>,
 
     /// In-memory bitvec of true and false flags.
     bitvec: BitVec,
@@ -28,8 +28,11 @@ pub struct BitvecFlags {
     len: usize,
 }
 
-impl BitvecFlags {
-    pub fn new(dynamic_flags: DynamicStoredFlags<MmapFile>) -> OperationResult<Self> {
+impl<S> BitvecFlags<S>
+where
+    S: UioDynamicFlags,
+{
+    pub fn new(dynamic_flags: DynamicStoredFlags<S>) -> OperationResult<Self> {
         // load flags into memory
         let bitvec = BitVec::from_bitslice(&*dynamic_flags.get_bitslice()?);
 
@@ -118,9 +121,17 @@ impl BitvecFlags {
     }
 }
 
+#[duplicate::duplicate_item(
+    tests_mod       S               cfg_predicate;
+    [tests_mmap]    [MmapFile]      [cfg(all())];
+    [tests_uring]   [IoUringFile]   [cfg(target_os = "linux")];
+)]
+#[cfg_predicate]
 #[cfg(test)]
-mod tests {
+mod tests_mod {
     use common::types::PointOffsetType;
+    #[cfg_predicate]
+    use common::universal_io::S;
 
     use crate::common::flags::bitvec_flags::BitvecFlags;
     use crate::common::flags::dynamic_stored_flags::DynamicStoredFlags;
@@ -134,7 +145,7 @@ mod tests {
 
         // Create and update flags
         {
-            let mmap_flags = DynamicStoredFlags::open(dir.path(), false).unwrap();
+            let mmap_flags = DynamicStoredFlags::<S>::open(dir.path(), false).unwrap();
             let mut bitvec_flags = BitvecFlags::new(mmap_flags).unwrap();
 
             // Set various flags - we'll set up to index 19 to have a length of 20
@@ -163,7 +174,7 @@ mod tests {
 
         // Verify bitmap consistency after reload
         {
-            let mmap_flags = DynamicStoredFlags::open(dir.path(), true).unwrap();
+            let mmap_flags = DynamicStoredFlags::<S>::open(dir.path(), true).unwrap();
             let bitvec_flags = BitvecFlags::new(mmap_flags).unwrap();
 
             // Verify iteration consistency after reload

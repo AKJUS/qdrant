@@ -4,6 +4,7 @@ use common::bitvec::BitSlice;
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::counter::iterator_hw_measurement::HwMeasurementIteratorExt;
 use common::types::PointOffsetType;
+use common::universal_io::MmapFile;
 use fs_err as fs;
 use roaring::RoaringBitmap;
 
@@ -26,12 +27,12 @@ pub struct MutableBoolIndex {
     indexed_count: usize,
     trues_count: usize,
     falses_count: usize,
-    storage: Storage,
+    storage: Storage<MmapFile>,
 }
 
-struct Storage {
-    trues_flags: RoaringFlags,
-    falses_flags: RoaringFlags,
+struct Storage<S> {
+    trues_flags: RoaringFlags<S>,
+    falses_flags: RoaringFlags<S>,
 }
 
 impl MutableBoolIndex {
