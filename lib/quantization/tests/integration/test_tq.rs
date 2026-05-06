@@ -97,9 +97,13 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::normal(TQMode::Normal)]
-    #[case::plus(TQMode::Plus)]
-    fn test_tq_dot(#[case] mode: TQMode) {
+    #[case::normal(TQMode::Normal, 1)]
+    #[case::plus(TQMode::Plus, 1)]
+    // Exercises the threaded TQ+ pre-pass — keeps the parallel coord-chunk
+    // push covered by integration testing (single-threaded paths stay
+    // covered by the cases above).
+    #[case::plus_parallel(TQMode::Plus, 4)]
+    fn test_tq_dot(#[case] mode: TQMode, #[case] num_threads: usize) {
         for &bits in BITS {
             for &dim in DIMS {
                 if !should_test(dim, bits) {
@@ -132,6 +136,7 @@ mod tests {
                     VECTORS_COUNT,
                     bits,
                     mode,
+                    num_threads,
                     None,
                     &AtomicBool::new(false),
                 )
@@ -189,6 +194,7 @@ mod tests {
                     VECTORS_COUNT,
                     bits,
                     mode,
+                    1,
                     None,
                     &AtomicBool::new(false),
                 )
@@ -243,6 +249,7 @@ mod tests {
                     VECTORS_COUNT,
                     bits,
                     mode,
+                    1,
                     None,
                     &AtomicBool::new(false),
                 )
@@ -297,6 +304,7 @@ mod tests {
                     VECTORS_COUNT,
                     bits,
                     mode,
+                    1,
                     None,
                     &AtomicBool::new(false),
                 )
@@ -356,6 +364,7 @@ mod tests {
                     VECTORS_COUNT,
                     bits,
                     mode,
+                    1,
                     None,
                     &AtomicBool::new(false),
                 )
@@ -410,6 +419,7 @@ mod tests {
                     VECTORS_COUNT,
                     bits,
                     mode,
+                    1,
                     None,
                     &AtomicBool::new(false),
                 )
@@ -473,6 +483,7 @@ mod tests {
                     VECTORS_COUNT,
                     bits,
                     mode,
+                    1,
                     None,
                     &AtomicBool::new(false),
                 )
@@ -529,6 +540,7 @@ mod tests {
                     VECTORS_COUNT,
                     bits,
                     mode,
+                    1,
                     None,
                     &AtomicBool::new(false),
                 )
@@ -582,6 +594,7 @@ mod tests {
                 VECTORS_COUNT,
                 bits,
                 mode,
+                1,
                 None,
                 &AtomicBool::new(false),
             )
@@ -639,6 +652,7 @@ mod tests {
                     VECTORS_COUNT,
                     bits,
                     mode,
+                    1,
                     None,
                     &AtomicBool::new(false),
                 )
@@ -693,6 +707,7 @@ mod tests {
                     VECTORS_COUNT,
                     bits,
                     mode,
+                    1,
                     None,
                     &AtomicBool::new(false),
                 )
@@ -747,6 +762,7 @@ mod tests {
                     VECTORS_COUNT,
                     bits,
                     mode,
+                    1,
                     None,
                     &AtomicBool::new(false),
                 )
@@ -801,6 +817,7 @@ mod tests {
                     VECTORS_COUNT,
                     bits,
                     mode,
+                    1,
                     None,
                     &AtomicBool::new(false),
                 )
@@ -867,6 +884,7 @@ mod tests {
                 n,
                 bits,
                 mode,
+                1,
                 None,
                 &AtomicBool::new(false),
             )
