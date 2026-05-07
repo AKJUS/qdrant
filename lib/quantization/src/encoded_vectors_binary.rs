@@ -840,6 +840,22 @@ impl<TBitsStoreType: BitsStoreType, TStorage: EncodedStorage> EncodedVectors
         )
     }
 
+    fn for_each_in_batch<F>(&self, offsets: &[PointOffsetType], callback: F)
+    where
+        F: FnMut(usize, &[u8]),
+    {
+        self.encoded_vectors.for_each_in_batch(offsets, callback);
+    }
+
+    fn score(
+        &self,
+        query: &Self::EncodedQuery,
+        encoded_vector: &[u8],
+        hw_counter: &HardwareCounterCell,
+    ) -> f32 {
+        self.score_bytes(True, query, encoded_vector, hw_counter)
+    }
+
     fn score_point(
         &self,
         query: &EncodedQueryBQ<TBitsStoreType>,

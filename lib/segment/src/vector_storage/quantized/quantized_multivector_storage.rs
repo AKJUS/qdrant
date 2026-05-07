@@ -434,6 +434,17 @@ where
             .collect()
     }
 
+    fn for_each_in_batch<F>(&self, _: &[PointOffsetType], _: F)
+    where
+        F: FnMut(usize, &[u8]),
+    {
+        unimplemented!("quantized multi-vector storage does not support `for_each_in_batch`")
+    }
+
+    fn score(&self, _: &Self::EncodedQuery, _: &[u8], _: &HardwareCounterCell) -> f32 {
+        unimplemented!("quantized multi-vector storage does not support `score`");
+    }
+
     fn score_point(
         &self,
         query: &Vec<QuantizedStorage::EncodedQuery>,
