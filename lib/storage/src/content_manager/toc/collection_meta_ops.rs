@@ -576,7 +576,7 @@ impl TableOfContent {
             }
             ShardTransferOperations::RecoveryToPartial(transfer)
             | ShardTransferOperations::SnapshotRecovered(transfer) => {
-                // Validate transfer exists to prevent double handling
+                // Validate transfer exists
                 transfer::helpers::validate_transfer_exists(
                     &transfer,
                     &collection.state().await.transfers,
@@ -635,7 +635,7 @@ impl TableOfContent {
                 )?;
                 log::warn!("Aborting shard transfer: {reason}");
                 collection
-                    .abort_shard_transfer_and_resharding(transfer, None)
+                    .abort_shard_transfer_and_resharding(transfer)
                     .await?;
             }
         };

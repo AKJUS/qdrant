@@ -213,7 +213,7 @@ impl Collection {
 
     /// Handle replica changes
     ///
-    /// add and remove replicas from replica set
+    /// Remove replicas from replica set
     pub async fn handle_replica_changes(
         &self,
         replica_changes: Vec<Change>,
@@ -223,17 +223,17 @@ impl Collection {
         }
 
         let shard_holder = self.shards_holder.read().await;
+        let mut to_remove = Vec::with_capacity(replica_changes.len());
 
         for change in replica_changes {
             let (shard_id, peer_id) = match change {
                 Change::Remove(shard_id, peer_id) => (shard_id, peer_id),
             };
 
-            let Some(replica_set) = shard_holder.get_shard(shard_id) else {
+            let Some(replica_set) = shard_holder.get_shard(shard_id).cloned() else {
                 return Err(CollectionError::bad_request(format!(
-                    "Shard {} of {} not found",
-                    shard_id,
-                    self.name()
+                    "Shard {shard_id} of {} not found",
+                    self.name(),
                 )));
             };
 
@@ -268,9 +268,15 @@ impl Collection {
                     .get_transfers(|transfer| transfer.from == peer_id || transfer.to == peer_id)
             };
 
-            // ...and cancel transfer tasks and remove transfers from internal state
+            to_remove.push((replica_set, peer_id, transfers));
+        }
+
+        // Must release shard holder lock for abort_shard_transfer_and_resharding
+        drop(shard_holder);
+
+        for (replica_set, peer_id, transfers) in to_remove {
             for transfer in transfers {
-                self.abort_shard_transfer_and_resharding(transfer.key(), Some(&shard_holder))
+                self.abort_shard_transfer_and_resharding(transfer.key())
                     .await?;
             }
 
@@ -283,6 +289,7 @@ impl Collection {
             // the transfer should be cancelled (see the block right above this comment),
             // so no special handling is needed.
         }
+
         Ok(())
     }
 
